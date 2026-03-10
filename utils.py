@@ -8,9 +8,6 @@ import numpy as np
 import pandas as pd
 import torch
 
-# Suppress nibabel's noisy "pixdim[0] (qfac) should be 1 or -1" info messages.
-# Our pipeline reorients to RAS via Orientationd, so the default qfac=1 is safe.
-logging.getLogger("nibabel.nifti1").setLevel(logging.WARNING)
 from monai.transforms import (
     Compose,
     EnsureChannelFirstd,
@@ -23,6 +20,11 @@ from monai.transforms import (
     Spacingd,
     ToTensord,
 )
+
+# Suppress nibabel's noisy "pixdim[0] (qfac) should be 1 or -1" info messages.
+# Our pipeline reorients to RAS via Orientationd, so the default qfac=1 is safe.
+# Must be set *after* MONAI import (which initialises nibabel loggers).
+logging.getLogger("nibabel").setLevel(logging.WARNING)
 
 log = logging.getLogger(__name__)
 
