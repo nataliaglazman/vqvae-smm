@@ -258,7 +258,7 @@ def train(args):
                 # save first validation recon for visual sanity check
                 if step == args.checkpoint_steps:
                     save_decoded_images(
-                        mmodel=model,
+                        model=model,
                         data=batch,
                         args=args,
                         step=step,
