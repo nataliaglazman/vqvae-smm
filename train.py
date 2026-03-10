@@ -9,12 +9,14 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+import nibabel as nib
 
 from config import parse_args
 from helper import get_device, get_parameter_count
 from loss import BaselineLoss
-from utils import ADNIDataset, TBSummaryTypes, build_transforms, load_items
+from utils import ADNIDataset, TBSummaryTypes, build_transforms, load_items, save_decoded_images
 from vqvae2 import VQVAE
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,7 +89,7 @@ def validate(model, loader, loss_fn, device, amp_enabled):
             loss = loss_fn({"reconstruction": [recon], "quantization_losses": diffs}, images)
         total += loss.item()
         n += 1
-    return total / max(n, 1)
+    return recon, total / max(n, 1)
 
 
 # ── Training ──────────────────────────────────────────────────────────────────
@@ -252,7 +254,17 @@ def train(args):
 
             # ── Validation + checkpoint ───────────────────────────────────
             if step > 0 and step % args.checkpoint_steps == 0:
-                val_loss = validate(model, val_loader, loss_fn, device, amp_enabled)
+                recon, val_loss = validate(model, val_loader, loss_fn, device, amp_enabled)
+                # save first validation recon for visual sanity check
+                if step == args.checkpoint_steps:
+                    save_decoded_images(
+                        mmodel=model,
+                        data=batch,
+                        args=args,
+                        step=step,
+                    )
+                
+
                 log.info(f"  val loss: {val_loss:.4f} (best: {best_val_loss:.4f})")
 
                 if writer:
