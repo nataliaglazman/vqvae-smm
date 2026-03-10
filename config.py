@@ -6,7 +6,6 @@ import functools
 import operator
 
 import numpy as np
-import utils.utils as utils
 
 
 def parse_args() -> argparse.ArgumentParser:
@@ -17,7 +16,7 @@ def parse_args() -> argparse.ArgumentParser:
         argparse.ArgumentParser: Parser (call ``.parse_args()`` to get the namespace).
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataroot", type=str, default="/data/natalia/")
+    parser.add_argument("--dataroot", type=str, default="/nfs/home/nglazman/")
     parser.add_argument("--model-dir", type=str, default="results")
     parser.add_argument("--model-id", type=str, default="vqvae")
     parser.add_argument("--encoding-size", type=int, default=256)
@@ -29,7 +28,10 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--log-steps", type=int, default=100)
     parser.add_argument("--checkpoint-steps", type=int, default=1000)
     parser.add_argument("--evaluate", action="store_true")
-    parser.add_argument("--val-size", default=25000, type=int)
+    parser.add_argument(
+        "--val-size", default=0.15, type=float,
+        help="Validation fraction (0-1) or absolute count (>=1)",
+    )
     parser.add_argument("--test-size", default=25000, type=int)
     parser.add_argument("--seed", type=int, default=np.random.randint(32**2 - 1))
     parser.add_argument(
@@ -87,6 +89,12 @@ def parse_args() -> argparse.ArgumentParser:
     # Image preprocessing
     parser.add_argument("--image-spacing", type=float, default=2.0, help="Isotropic voxel spacing in mm")
     parser.add_argument("--crop-margin", type=int, default=0, help="Voxels to crop from each edge")
+    parser.add_argument(
+        "--csv-path", type=str,
+        default="/nfs/home/nglazman/cluster/labels_cleaned_3class.csv",
+        help="Path to CSV file with Subject and Group columns",
+    )
+    parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Max gradient norm for clipping")
     parser.add_argument("--change-lists", default=[[4, 5, 6, 8, 9, 10]])
     parser.add_argument("--faiss-omp-threads", type=int, default=16)
     # Evaluation

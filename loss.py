@@ -11,7 +11,7 @@ from torch import cat, reshape, tensor
 from torch.fft import fftn
 from torch.nn import PairwiseDistance
 
-from utils.utils import TBSummaryTypes
+from utils import TBSummaryTypes
 
 class BaurLoss(object):
     def __init__(self, lambda_reconstruction=1):

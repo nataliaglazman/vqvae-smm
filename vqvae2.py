@@ -6,9 +6,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
+from helper import HelperModule
 
 
-class ReZero():
+class ReZero(HelperModule):
     """3D ReZero residual block with learnable scaling parameter."""
 
     def build(self, in_channels: int, res_channels: int):
@@ -26,7 +27,7 @@ class ReZero():
         return self.layers(x) * self.alpha + x
 
 
-class ResidualStack():
+class ResidualStack(HelperModule):
     """Stack of 3D ReZero residual blocks with optional gradient checkpointing."""
 
     def build(
@@ -47,7 +48,7 @@ class ResidualStack():
         return x
 
 
-class Encoder():
+class Encoder(HelperModule):
     """3D Encoder with strided convolutions for downsampling."""
 
     def build(
@@ -82,7 +83,7 @@ class Encoder():
         return self.layers(x)
 
 
-class Decoder():
+class Decoder(HelperModule):
     """3D Decoder with transposed convolutions for upsampling.
     """
 
@@ -134,7 +135,7 @@ class Decoder():
     
 
 
-class CodeLayer():
+class CodeLayer(HelperModule):
     """3D Vector Quantization layer with EMA codebook updates."""
 
     def build(self, in_channels: int, embed_dim: int, nb_entries: int):
@@ -180,7 +181,7 @@ class CodeLayer():
     def embed_code(self, embed_id: torch.LongTensor) -> torch.FloatTensor:
         return F.embedding(embed_id, self.embed.transpose(0, 1))
 
-class Upscaler():
+class Upscaler(HelperModule):
     """3D Upscaler for hierarchical code conditioning."""
 
     def build(
@@ -202,18 +203,18 @@ class Upscaler():
         return self.stages[stage](x)
 
 
-class VQVAE():
+class VQVAE(HelperModule):
     def build(
         self,
-        in_channels: int = 1,  # 1 for grayscale MRI
-        hidden_channels: int = 128,
+        in_channels: int = 1,
+        hidden_channels: int = 64,
         res_channels: int = 32,
         nb_res_layers: int = 2,
         nb_levels: int = 3,
-        embed_dim: int = 64,
-        nb_entries: int = 512,
-        scaling_rates: list[int] = [8, 4, 2],
-        use_checkpoint: bool = True,  # Gradient checkpointing to save memory
+        embed_dim: int = 32,
+        nb_entries: int = 384,
+        scaling_rates: list[int] = [2, 2, 2],
+        use_checkpoint: bool = True,
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
