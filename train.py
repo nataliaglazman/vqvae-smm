@@ -256,7 +256,18 @@ def train(args):
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     total_opt_steps = max(args.train_steps // args.gradient_accumulation_steps, 1)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_opt_steps)
+    warmup_steps = min(args.warmup_steps, total_opt_steps // 5)  # cap at 20% of training
+    cosine_steps = max(total_opt_steps - warmup_steps, 1)
+    warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=1e-2, end_factor=1.0, total_iters=warmup_steps,
+    )
+    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=cosine_steps,
+    )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_steps],
+    )
     scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
 
     # ── Resume ────────────────────────────────────────────────────────────────
@@ -361,12 +372,14 @@ def train(args):
             # ── Validation + checkpoint ───────────────────────────────────
             if step > 0 and step % args.checkpoint_steps == 0:
                 recon, val_loss = validate(model, val_loader, loss_fn, device, amp_enabled)
+                # Use a clean (un-augmented) validation sample for visual comparison
+                val_sample = next(iter(val_loader))
                 save_decoded_images(
                     model=model,
-                    data=batch,
+                    data=val_sample,
                     args=args,
                     step=step,
-                    save_dir = save_dir
+                    save_dir=save_dir,
                 )
                 
 

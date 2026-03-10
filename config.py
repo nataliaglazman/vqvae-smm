@@ -94,6 +94,10 @@ def parse_args() -> argparse.ArgumentParser:
         help="Path to CSV file with Subject and Group columns",
     )
     parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Max gradient norm for clipping")
+    parser.add_argument(
+        "--warmup-steps", type=int, default=500,
+        help="Linear LR warmup steps before cosine decay (0 to disable)",
+    )
     parser.add_argument("--change-lists", default=[[4, 5, 6, 8, 9, 10]])
     parser.add_argument("--faiss-omp-threads", type=int, default=16)
     # Evaluation

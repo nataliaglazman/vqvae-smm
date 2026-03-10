@@ -136,15 +136,23 @@ class Decoder(HelperModule):
 
 
 class CodeLayer(HelperModule):
-    """3D Vector Quantization layer with EMA codebook updates."""
+    """3D Vector Quantization layer with EMA codebook updates.
 
-    def build(self, in_channels: int, embed_dim: int, nb_entries: int):
+    Includes codebook utilization monitoring (perplexity) and automatic
+    dead-code resetting.  Dead entries — those whose EMA cluster size falls
+    below ``dead_threshold`` — are re-initialised to randomly sampled encoder
+    outputs so they can be re-used.
+    """
+
+    def build(self, in_channels: int, embed_dim: int, nb_entries: int,
+              dead_threshold: float = 1.0):
         self.conv_in = nn.Conv3d(in_channels, embed_dim, 1)
 
         self.dim = embed_dim
         self.n_embed = nb_entries
         self.decay = 0.99
         self.eps = 1e-5
+        self.dead_threshold = dead_threshold
 
         embed = torch.randn(embed_dim, nb_entries, dtype=torch.float32)
         self.register_buffer("embed", embed)
@@ -173,6 +181,19 @@ class CodeLayer(HelperModule):
             embed_normalized = self.embed_avg / cluster_size.unsqueeze(0)
             self.embed.data.copy_(embed_normalized)
 
+            # ── Dead code reset ──────────────────────────────────────────
+            # Entries whose EMA cluster size is below the threshold are
+            # considered dead.  Replace them with randomly sampled encoder
+            # outputs so they have a chance of being picked up again.
+            dead_mask = self.cluster_size < self.dead_threshold
+            n_dead = dead_mask.sum().item()
+            if n_dead > 0:
+                n_samples = flatten.shape[0]
+                replace_idx = torch.randint(0, n_samples, (n_dead,), device=flatten.device)
+                self.embed.data[:, dead_mask] = flatten[replace_idx].T
+                self.embed_avg.data[:, dead_mask] = flatten[replace_idx].T
+                self.cluster_size.data[dead_mask] = 1.0
+
         diff = (quantize.detach() - x).pow(2).mean()
         quantize = x + (quantize - x).detach()
 
@@ -180,6 +201,29 @@ class CodeLayer(HelperModule):
 
     def embed_code(self, embed_id: torch.LongTensor) -> torch.FloatTensor:
         return F.embedding(embed_id, self.embed.transpose(0, 1))
+
+    @torch.no_grad()
+    def codebook_utilization(self) -> dict:
+        """Compute codebook health metrics (call after forward pass).
+
+        Returns:
+            dict with keys:
+              - ``active_codes``: number of entries with cluster_size >= dead_threshold
+              - ``utilization``:  fraction of codebook in use (0–1)
+              - ``perplexity``:   exp(entropy) of the usage distribution — equals
+                                  n_embed when all codes are used uniformly
+        """
+        # Normalise cluster sizes into a probability distribution
+        probs = self.cluster_size / self.cluster_size.sum().clamp(min=1e-10)
+        # Perplexity = exp(H) where H = -sum(p * log(p))
+        log_probs = torch.log(probs + 1e-10)
+        perplexity = torch.exp(-(probs * log_probs).sum())
+        active = (self.cluster_size >= self.dead_threshold).sum()
+        return {
+            "active_codes": active.item(),
+            "utilization": active.item() / self.n_embed,
+            "perplexity": perplexity.item(),
+        }
 
 class Upscaler(HelperModule):
     """3D Upscaler for hierarchical code conditioning."""
