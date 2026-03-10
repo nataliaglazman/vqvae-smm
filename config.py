@@ -16,7 +16,7 @@ def parse_args() -> argparse.ArgumentParser:
         argparse.ArgumentParser: Parser (call ``.parse_args()`` to get the namespace).
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataroot", type=str, default="/nfs/home/nglazman/")
+    parser.add_argument("--dataroot", type=str, default="/nfs/home/nglazman/ADNI_registered")
     parser.add_argument("--model-dir", type=str, default="results")
     parser.add_argument("--model-id", type=str, default="vqvae")
     parser.add_argument("--encoding-size", type=int, default=256)
