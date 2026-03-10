@@ -163,9 +163,9 @@ def save_decoded_images(model, data, args, step: int) -> None:
 
     with torch.no_grad():
         samples = data["image"]
-        img = samples[0][0:1]  # (1, 1, D, H, W) — first sample from first view
+        img = samples[0:1]  # (1, C, D, H, W) — first sample, keep batch dim
 
-        decoded,  = model(img.to(next(model.parameters()).device), return_recon=True)[0]
+        decoded = model(img.to(next(model.parameters()).device), return_recon=True)[0]
 
         decoded_np = decoded.squeeze().cpu().numpy()
         original_np = img.squeeze().cpu().numpy()
