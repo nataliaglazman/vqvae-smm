@@ -303,6 +303,7 @@ class VQVAE(HelperModule):
             decoder_outputs: Decoder features per level (or empty list)
             id_outputs: Codebook indices per level
         """
+        input_shape = x.shape[2:]  # (D, H, W) – remember for final interpolation
         encoder_outputs = []  # Spatial (5D) feature maps, consumed by codebook/decoder loop
         encoder_pools = []  # Pooled (B, C) vectors, returned for contrastive loss
         code_outputs = []
@@ -386,6 +387,15 @@ class VQVAE(HelperModule):
 
         if return_recon:
             final_output = decoder_outputs[-1]
+            # Strided conv/transposed-conv pairs lose fractional pixels on odd
+            # spatial dims.  Interpolate back to the original input shape.
+            if final_output.shape[2:] != input_shape:
+                final_output = F.interpolate(
+                    final_output,
+                    size=input_shape,
+                    mode="trilinear",
+                    align_corners=False,
+                )
         else:
             final_output = None
             decoder_outputs = []

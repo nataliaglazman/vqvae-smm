@@ -119,10 +119,6 @@ class BaselineLoss(torch.nn.Module):
         y = network_output["reconstruction"][0].float()
         q_losses = network_output["quantization_losses"]
 
-        print(f"Reconstruction tensor shape: {y.shape}")
-        print(f"Quantization losses: {[q_loss.item() for q_loss in q_losses]}")
-        print(f"Original image tensor shape: {x.shape}")
-
         loss = (
             self._calculate_pixel_loss(x, y)
             + self._calculate_frequency_loss(x, y)
