@@ -103,6 +103,9 @@ def train(args):
     out_dir = Path(args.model_dir) / args.model_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    save_dir = out_dir / "decoded_images"
+    save_dir.mkdir(exist_ok=True)
+
     with open(out_dir / "args.json", "w") as f:
         json.dump(vars(args), f, indent=2, default=str)
 
@@ -262,6 +265,7 @@ def train(args):
                         data=batch,
                         args=args,
                         step=step,
+                        save_dir = save_dir
                     )
                 
 

@@ -3,6 +3,7 @@
 import enum
 import logging
 import os
+from zipfile import Path
 
 import numpy as np
 import pandas as pd
@@ -146,7 +147,7 @@ class ADNIDataset(torch.utils.data.Dataset):
         return {"image": data["image"], "label": item["label"], "index": idx}
 
 
-def save_decoded_images(model, data, args, step: int) -> None:
+def save_decoded_images(model, data, args, step: int, save_dir: Path) -> None:
     """
     Encode then decode the first sample and write original + reconstruction as NIfTI files.
 
@@ -171,7 +172,7 @@ def save_decoded_images(model, data, args, step: int) -> None:
         original_np = img.squeeze().cpu().numpy()
 
         affine_2mm = np.diag([2.0, 2.0, 2.0, 1.0])
-        save_dir = os.path.join(args.save_dir, "decoded_images")
+        save_dir = os.path.join(save_dir, "decoded_images")
         os.makedirs(save_dir, exist_ok=True)
 
         nib.save(
