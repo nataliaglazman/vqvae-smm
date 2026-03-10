@@ -258,15 +258,13 @@ def train(args):
             # ── Validation + checkpoint ───────────────────────────────────
             if step > 0 and step % args.checkpoint_steps == 0:
                 recon, val_loss = validate(model, val_loader, loss_fn, device, amp_enabled)
-                # save first validation recon for visual sanity check
-                if step == args.checkpoint_steps:
-                    save_decoded_images(
-                        model=model,
-                        data=batch,
-                        args=args,
-                        step=step,
-                        save_dir = save_dir
-                    )
+                save_decoded_images(
+                    model=model,
+                    data=batch,
+                    args=args,
+                    step=step,
+                    save_dir = save_dir
+                )
                 
 
                 log.info(f"  val loss: {val_loss:.4f} (best: {best_val_loss:.4f})")
