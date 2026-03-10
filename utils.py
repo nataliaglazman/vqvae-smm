@@ -3,12 +3,13 @@
 import enum
 import logging
 import os
-from zipfile import Path
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
 
+from monai.data import CacheDataset
 from monai.transforms import (
     Compose,
     EnsureChannelFirstd,
@@ -51,14 +52,19 @@ def get_spatial_size(spacing):
 
 
 def build_transforms(spacing=2.0, crop_margin=0):
-    """Build MONAI training and validation transform pipelines.
+    """Build deterministic + random transform pipelines for CacheDataset.
+
+    The deterministic transforms (load, resample, orient, normalize) are
+    executed once and cached in RAM by MONAI's CacheDataset.  The random
+    augmentation transforms are applied on-the-fly each epoch.
 
     Args:
         spacing: Isotropic voxel spacing in mm.
         crop_margin: Voxels to crop from each edge.
 
     Returns:
-        (train_transforms, val_transforms)
+        (det_transform, rand_transform) — pass det_transform to
+        ``build_cached_dataset`` and rand_transform for training only.
     """
     spatial_size = get_spatial_size(spacing)
     if crop_margin > 0:
@@ -66,37 +72,38 @@ def build_transforms(spacing=2.0, crop_margin=0):
 
     log.info(f"Voxel spacing: {spacing}mm, spatial size: {spatial_size}")
 
-    def _build(is_training=False):
-        t = [
-            LoadImaged(keys=["image"]),
-            EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
-        ]
-        if spacing != 1.0:
-            t.append(
-                Spacingd(keys=["image"], pixdim=(spacing, spacing, spacing), mode="bilinear")
-            )
-        t.extend([
-            Orientationd(keys=["image"], axcodes="RAS"),
-            ResizeWithPadOrCropd(keys=["image"], spatial_size=spatial_size),
-            NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
-        ])
-        if is_training:
-            t.extend([
-                RandAffined(
-                    keys=["image"],
-                    rotate_range=[-0.05, 0.05],
-                    shear_range=[0.001, 0.05],
-                    scale_range=[0, 0.05],
-                    mode="bilinear",
-                    padding_mode="zeros",
-                    prob=0.5,
-                ),
-                RandShiftIntensityd(keys=["image"], offsets=(-0.1, 0.1), prob=0.2),
-            ])
-        t.append(ToTensord(keys=["image"]))
-        return Compose(t)
+    # Deterministic preprocessing (cached after first pass)
+    det = [
+        LoadImaged(keys=["image"]),
+        EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
+    ]
+    if spacing != 1.0:
+        det.append(
+            Spacingd(keys=["image"], pixdim=(spacing, spacing, spacing), mode="bilinear")
+        )
+    det.extend([
+        Orientationd(keys=["image"], axcodes="RAS"),
+        ResizeWithPadOrCropd(keys=["image"], spatial_size=spatial_size),
+        NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
+        ToTensord(keys=["image"]),
+    ])
+    det_transform = Compose(det)
 
-    return _build(is_training=True), _build(is_training=False)
+    # Random augmentation (applied on-the-fly, never cached)
+    rand_transform = Compose([
+        RandAffined(
+            keys=["image"],
+            rotate_range=[-0.05, 0.05],
+            shear_range=[0.001, 0.05],
+            scale_range=[0, 0.05],
+            mode="bilinear",
+            padding_mode="zeros",
+            prob=0.5,
+        ),
+        RandShiftIntensityd(keys=["image"], offsets=(-0.1, 0.1), prob=0.2),
+    ])
+
+    return det_transform, rand_transform
 
 
 def load_data(df, data_dir, label_map):
@@ -147,6 +154,57 @@ class ADNIDataset(torch.utils.data.Dataset):
         return {"image": data["image"], "label": item["label"], "index": idx}
 
 
+class CachedAugDataset(torch.utils.data.Dataset):
+    """Wraps a MONAI CacheDataset and applies random augmentation on the fly.
+
+    CacheDataset caches the expensive deterministic transforms (load, resample,
+    orient, normalize) in RAM.  This wrapper applies lightweight random
+    augmentation (affine jitter, intensity shift) every time ``__getitem__``
+    is called, so each epoch sees different augmented views.
+    """
+
+    def __init__(self, cache_ds, rand_transform=None):
+        self.cache_ds = cache_ds
+        self.rand_transform = rand_transform
+
+    def __len__(self):
+        return len(self.cache_ds)
+
+    def __getitem__(self, idx):
+        data = self.cache_ds[idx]
+        if self.rand_transform is not None:
+            data = self.rand_transform(data)
+        return data
+
+
+def build_cached_dataset(data_dicts, det_transform, rand_transform=None,
+                         cache_rate=1.0, num_workers=4):
+    """Create a MONAI CacheDataset with optional on-the-fly augmentation.
+
+    Args:
+        data_dicts: List of dicts, each with at least an ``"image"`` key
+                    pointing to a NIfTI path.
+        det_transform: Deterministic Compose (load → normalize → tensor).
+        rand_transform: Random Compose for training augmentation (or None for val).
+        cache_rate: Fraction of data to cache in RAM (1.0 = all).
+        num_workers: Workers used *during initial caching* (not DataLoader workers).
+
+    Returns:
+        A ``CachedAugDataset`` (if rand_transform) or plain ``CacheDataset``.
+    """
+    log.info(f"Building CacheDataset ({len(data_dicts)} items, "
+             f"cache_rate={cache_rate}, workers={num_workers}) …")
+    cache_ds = CacheDataset(
+        data=data_dicts,
+        transform=det_transform,
+        cache_rate=cache_rate,
+        num_workers=num_workers,
+    )
+    if rand_transform is not None:
+        return CachedAugDataset(cache_ds, rand_transform)
+    return cache_ds
+
+
 def save_decoded_images(model, data, args, step: int, save_dir: Path) -> None:
     """
     Encode then decode the first sample and write original + reconstruction as NIfTI files.
@@ -172,7 +230,7 @@ def save_decoded_images(model, data, args, step: int, save_dir: Path) -> None:
         original_np = img.squeeze().cpu().numpy()
 
         affine_2mm = np.diag([2.0, 2.0, 2.0, 1.0])
-        save_dir = os.path.join(save_dir, "decoded_images")
+        save_dir = os.path.join(save_dir)
         os.makedirs(save_dir, exist_ok=True)
 
         nib.save(

@@ -1,5 +1,6 @@
 """Training script for VQ-VAE-2 on 3D brain MRI."""
 
+import csv
 import json
 import logging
 import random
@@ -14,7 +15,9 @@ import nibabel as nib
 from config import parse_args
 from helper import get_device, get_parameter_count
 from loss import BaselineLoss
-from utils import ADNIDataset, TBSummaryTypes, build_transforms, load_items, save_decoded_images
+from utils import (
+    TBSummaryTypes, build_cached_dataset, build_transforms, load_items, save_decoded_images,
+)
 from vqvae2 import VQVAE
 
 
@@ -24,6 +27,59 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger(__name__)
+
+
+# ── CSV Logger ────────────────────────────────────────────────────────────────
+
+
+class CSVLogger:
+    """Append-friendly CSV logger that writes one row per logged step.
+
+    On resume, new rows are simply appended to the existing file so that no
+    history is lost.  If the file doesn't exist, a header row is written first.
+    """
+
+    TRAIN_COLUMNS = [
+        "step", "epoch", "elapsed_s", "lr",
+        "total_loss", "pixel_loss", "fft_loss", "perceptual_loss",
+    ]
+    # vq_loss_0 … vq_loss_{N-1} are added dynamically based on nb_levels
+
+    VAL_COLUMNS = ["step", "epoch", "elapsed_s", "val_loss"]
+
+    def __init__(self, out_dir: Path, nb_levels: int):
+        self.out_dir = out_dir
+        self.nb_levels = nb_levels
+
+        # Build full train header (with per-level VQ columns)
+        self.train_columns = list(self.TRAIN_COLUMNS)
+        for i in range(nb_levels):
+            self.train_columns.append(f"vq_loss_{i}")
+
+        self.train_path = out_dir / "train_losses.csv"
+        self.val_path = out_dir / "val_losses.csv"
+
+        # Write headers only if the files don't exist yet
+        self._ensure_header(self.train_path, self.train_columns)
+        self._ensure_header(self.val_path, self.VAL_COLUMNS)
+
+    @staticmethod
+    def _ensure_header(path: Path, columns: list):
+        if not path.exists():
+            with open(path, "w", newline="") as f:
+                csv.writer(f).writerow(columns)
+
+    def log_train(self, row: dict):
+        """Append a training row.  Missing keys are written as empty strings."""
+        with open(self.train_path, "a", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=self.train_columns, extrasaction="ignore")
+            w.writerow(row)
+
+    def log_val(self, row: dict):
+        """Append a validation row."""
+        with open(self.val_path, "a", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=self.VAL_COLUMNS, extrasaction="ignore")
+            w.writerow(row)
 
 
 # ── Checkpoint helpers ────────────────────────────────────────────────────────
@@ -98,6 +154,8 @@ def validate(model, loader, loss_fn, device, amp_enabled):
 def train(args):
     device = get_device(args.no_cuda)
     amp_enabled = args.use_amp and device.type == "cuda"
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
 
     # Output directory
     out_dir = Path(args.model_dir) / args.model_id
@@ -122,7 +180,9 @@ def train(args):
         log.error("No data items found. Check --dataroot and --csv-path.")
         return
 
-    train_t, val_t = build_transforms(spacing=args.image_spacing, crop_margin=args.crop_margin)
+    det_transform, rand_transform = build_transforms(
+        spacing=args.image_spacing, crop_margin=args.crop_margin,
+    )
 
     # Train / val split
     if args.val_size < 1:
@@ -132,8 +192,23 @@ def train(args):
     val_count = max(1, min(val_count, len(items) // 2))
 
     np.random.shuffle(items)
-    train_set = ADNIDataset(items[val_count:], train_t)
-    val_set = ADNIDataset(items[:val_count], val_t)
+    train_items = items[val_count:]
+    val_items = items[:val_count]
+
+    # Build MONAI data dicts (CacheDataset expects list-of-dicts with file paths)
+    train_dicts = [{"image": it["image"]} for it in train_items]
+    val_dicts = [{"image": it["image"]} for it in val_items]
+
+    # CacheDataset caches deterministic transforms in RAM (load once).
+    # Random augmentation is applied on-the-fly by CachedAugDataset wrapper.
+    train_set = build_cached_dataset(
+        train_dicts, det_transform, rand_transform=rand_transform,
+        cache_rate=1.0, num_workers=args.workers,
+    )
+    val_set = build_cached_dataset(
+        val_dicts, det_transform, rand_transform=None,
+        cache_rate=1.0, num_workers=args.workers,
+    )
     log.info(f"Dataset split -- train: {len(train_set)}, val: {len(val_set)}")
 
     if len(train_set) < args.batch_size:
@@ -143,20 +218,24 @@ def train(args):
         )
         return
 
+    loader_kwargs = dict(
+        pin_memory=device.type == "cuda",
+        num_workers=args.workers,
+        persistent_workers=args.workers > 0,
+        prefetch_factor=2 if args.workers > 0 else None,
+    )
     train_loader = DataLoader(
         train_set,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=args.workers,
-        pin_memory=device.type == "cuda",
         drop_last=True,
+        **loader_kwargs,
     )
     val_loader = DataLoader(
         val_set,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=args.workers,
-        pin_memory=device.type == "cuda",
+        **loader_kwargs,
     )
 
     # ── Model ─────────────────────────────────────────────────────────────────
@@ -197,11 +276,15 @@ def train(args):
     except ImportError:
         log.warning("tensorboard not installed -- logging to stdout only")
 
+    # ── CSV Logger ────────────────────────────────────────────────────────────
+    csv_logger = CSVLogger(out_dir, nb_levels=args.vqvae_nb_levels)
+    log.info(f"CSV logs -> {csv_logger.train_path}, {csv_logger.val_path}")
+
     # ── Training loop ─────────────────────────────────────────────────────────
     model.train()
     step = start_step
     epoch = 0
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
 
     log.info(f"Training: step {step} -> {args.train_steps}")
     t0 = time.time()
@@ -232,7 +315,7 @@ def train(args):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.max_grad_norm)
                 scaler.step(optimizer)
                 scaler.update()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 scheduler.step()
 
             # ── Logging ───────────────────────────────────────────────────
@@ -249,6 +332,26 @@ def train(args):
                         for name, val in loss_fn.get_summaries().get(TBSummaryTypes.SCALAR, {}).items():
                             v = val.item() if torch.is_tensor(val) else val
                             writer.add_scalar(f"train/{name}", v, step)
+
+                # CSV row
+                csv_row = {
+                    "step": step, "epoch": epoch,
+                    "elapsed_s": f"{elapsed:.1f}", "lr": f"{lr:.2e}",
+                    "total_loss": f"{loss.item():.6f}",
+                }
+                if not skip_recon:
+                    summaries = loss_fn.get_summaries().get(TBSummaryTypes.SCALAR, {})
+                    for name, val in summaries.items():
+                        v = val.item() if torch.is_tensor(val) else val
+                        if "MAE" in name:
+                            csv_row["pixel_loss"] = f"{v:.6f}"
+                        elif "Jukebox" in name:
+                            csv_row["fft_loss"] = f"{v:.6f}"
+                        elif name == "Loss-Perceptual-Reconstruction":
+                            csv_row["perceptual_loss"] = f"{v:.6f}"
+                for i, d in enumerate(diffs):
+                    csv_row[f"vq_loss_{i}"] = f"{d.item():.6f}"
+                csv_logger.log_train(csv_row)
 
                 log.info(
                     f"step {step:>7d}/{args.train_steps} | loss {loss.item():.4f} | "
@@ -267,6 +370,11 @@ def train(args):
                 )
                 
 
+                csv_logger.log_val({
+                    "step": step, "epoch": epoch,
+                    "elapsed_s": f"{time.time() - t0:.1f}",
+                    "val_loss": f"{val_loss:.6f}",
+                })
                 log.info(f"  val loss: {val_loss:.4f} (best: {best_val_loss:.4f})")
 
                 if writer:
