@@ -137,14 +137,17 @@ def load_model_from_checkpoint(path, device="cpu"):
 def validate(model, loader, loss_fn, device, amp_enabled):
     model.eval()
     total, n = 0.0, 0
+    first_batch = None
     for batch in loader:
+        if first_batch is None:
+            first_batch = batch  # keep for decoded-image saving (avoids re-spawning workers)
         images = batch["image"].to(device)
         with torch.cuda.amp.autocast(enabled=amp_enabled):
             recon, diffs, *_ = model(images)
             loss = loss_fn({"reconstruction": [recon], "quantization_losses": diffs}, images)
         total += loss.item()
         n += 1
-    return recon, total / max(n, 1)
+    return first_batch, total / max(n, 1)
 
 
 # ── Training ──────────────────────────────────────────────────────────────────
@@ -384,10 +387,7 @@ def train(args):
 
             # ── Validation + checkpoint ───────────────────────────────────
             if step > 0 and step % args.checkpoint_steps == 0:
-                recon, val_loss = validate(model, val_loader, loss_fn, device, amp_enabled)
-                # Reuse the first batch already loaded by validate() instead of
-                # creating a new iterator (which re-spawns DataLoader workers).
-                val_sample = next(iter(val_loader))  # TODO: cache if profiling shows overhead
+                val_sample, val_loss = validate(model, val_loader, loss_fn, device, amp_enabled)
                 save_decoded_images(
                     model=model,
                     data=val_sample,
@@ -490,7 +490,7 @@ def run_evaluation(args):
     loss_fn = BaselineLoss().to(device)
     log.info(f"Evaluating on {len(val_set)} samples...")
 
-    _, val_loss = validate(model, val_loader, loss_fn, device, amp_enabled)
+    val_sample, val_loss = validate(model, val_loader, loss_fn, device, amp_enabled)
     log.info(f"Validation loss: {val_loss:.4f}")
 
     # Log per-level codebook utilization
@@ -502,7 +502,6 @@ def run_evaluation(args):
     # Save example reconstructions
     save_dir = Path(args.model_dir) / args.model_id / "eval_images"
     save_dir.mkdir(exist_ok=True)
-    val_sample = next(iter(val_loader))
     save_decoded_images(model=model, data=val_sample, args=args, step=0, save_dir=save_dir)
     log.info(f"Example reconstructions saved → {save_dir}")
 
