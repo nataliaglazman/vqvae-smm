@@ -132,14 +132,24 @@ class BaselineLoss(torch.nn.Module):
 
         return loss
 
-    def _calculate_frequency_loss(self, x, y) -> torch.Tensor:
-        # Compute FFT on the full batch at once — cheaper than a per-sample loop
-        # that builds a long autograd chain. Complex tensors are freed immediately
-        # after mse_loss since we don't store them.
+    def _calculate_frequency_loss(self, x, y, max_voxels: int = 128**3) -> torch.Tensor:
+        # Compute FFT on the batch.  For large 3D volumes the full-resolution
+        # rfftn and its backward graph consume several GB of GPU memory.
+        # When the volume exceeds *max_voxels*, we downsample to a manageable
+        # size first — the frequency loss is still meaningful at lower
+        # resolution and the memory saving is dramatic.
         with torch.cuda.amp.autocast(enabled=False):
             # fftn requires float32; x/y may be float16 under AMP
             x_f = (x.float() + 1.0) / 2.0
             y_f = (y.float() + 1.0) / 2.0
+
+            n_voxels = x_f[0, 0].numel()
+            if n_voxels > max_voxels:
+                scale = (max_voxels / n_voxels) ** (1.0 / 3.0)
+                target = [max(1, int(s * scale)) for s in x_f.shape[2:]]
+                x_f = F.interpolate(x_f, size=target, mode="trilinear", align_corners=False)
+                y_f = F.interpolate(y_f, size=target, mode="trilinear", align_corners=False)
+
             loss = F.mse_loss(torch.abs(rfftn(x_f, norm="ortho")), torch.abs(rfftn(y_f, norm="ortho"))).to(x.dtype)
 
         loss = loss * self.fft_factor

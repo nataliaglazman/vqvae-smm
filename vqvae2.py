@@ -164,13 +164,26 @@ class CodeLayer(HelperModule):
         flatten = x.reshape(-1, self.dim)
         dist = flatten.pow(2).sum(1, keepdim=True) - 2 * flatten @ self.embed + self.embed.pow(2).sum(0, keepdim=True)
         _, embed_ind = (-dist).max(1)
-        embed_onehot = F.one_hot(embed_ind, self.n_embed).type(flatten.dtype)
         embed_ind = embed_ind.view(*x.shape[:-1])
         quantize = self.embed_code(embed_ind)
 
         if self.training:
-            embed_onehot_sum = embed_onehot.sum(0)
-            embed_sum = flatten.transpose(0, 1) @ embed_onehot
+            # EMA codebook update using scatter ops instead of a massive
+            # (N, n_embed) one-hot matrix.  At 1mm spacing, level-0 has
+            # N = B*91*109*91 ≈ 7.2M entries — the old one-hot approach
+            # allocated ~11 GB for batch_size=8.  bincount + scatter_add_
+            # achieve the same result at near-zero extra memory.
+            flat_ind = embed_ind.reshape(-1)
+            embed_onehot_sum = torch.bincount(
+                flat_ind, minlength=self.n_embed,
+            ).to(dtype=flatten.dtype)
+            embed_sum = torch.zeros(
+                self.dim, self.n_embed,
+                device=flatten.device, dtype=flatten.dtype,
+            )
+            embed_sum.scatter_add_(
+                1, flat_ind.unsqueeze(0).expand(self.dim, -1), flatten.T,
+            )
 
             self.cluster_size.data.mul_(self.decay).add_(embed_onehot_sum, alpha=1 - self.decay)
             self.embed_avg.data.mul_(self.decay).add_(embed_sum, alpha=1 - self.decay)
