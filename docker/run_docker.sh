@@ -1,5 +1,5 @@
 runai submit --name vqvae-smm \
- -i aicregistry:5000/nglazman:multiview-crl-vqvae-latest \
+ -i aicregistry:5000/nglazman:vqvae-base \
  --node-type A100 \
  --run-as-user \
  --gpu 1 \
