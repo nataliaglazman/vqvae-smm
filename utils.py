@@ -132,6 +132,12 @@ def load_data(df, data_dir, label_map):
 def load_items(data_dir, csv_path):
     """Load all data items from CSV + data directory."""
     df = pd.read_csv(csv_path)
+    missing_cols = {"Subject", "Group"} - set(df.columns)
+    if missing_cols:
+        raise ValueError(
+            f"CSV at {csv_path} is missing required columns: {missing_cols}. "
+            f"Found columns: {list(df.columns)}"
+        )
     label_values = sorted(df["Group"].unique())
     label_map = {v: i for i, v in enumerate(label_values)}
     items, _ = load_data(df, data_dir, label_map)

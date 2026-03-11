@@ -86,7 +86,7 @@ def parse_args() -> argparse.ArgumentParser:
         help="Accumulate gradients over N steps (effective batch = batch_size × N)",
     )
     # Image preprocessing
-    parser.add_argument("--image-spacing", type=float, default=2.0, help="Isotropic voxel spacing in mm")
+    parser.add_argument("--image-spacing", type=float, default=1.0, help="Isotropic voxel spacing in mm")
     parser.add_argument("--crop-margin", type=int, default=0, help="Voxels to crop from each edge")
     parser.add_argument(
         "--csv-path", type=str,

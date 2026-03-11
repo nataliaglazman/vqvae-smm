@@ -124,7 +124,6 @@ class Decoder(HelperModule):
         layers.append(nn.Conv3d(c_channel, out_channels, 3, stride=1, padding=1))
         layers.append(nn.BatchNorm3d(out_channels))
         self.layers = nn.Sequential(*layers)
-        self.final_conv = None
 
     def forward(
         self,
@@ -347,6 +346,10 @@ class VQVAE(HelperModule):
             decoder_outputs: Decoder features per level (or empty list)
             id_outputs: Codebook indices per level
         """
+        assert x.ndim == 5, f"Expected 5D input (B, C, D, H, W), got {x.ndim}D with shape {x.shape}"
+        assert x.shape[1] == self.encoders[0].layers[0][0].in_channels, (
+            f"Expected {self.encoders[0].layers[0][0].in_channels} input channels, got {x.shape[1]}"
+        )
         input_shape = x.shape[2:]  # (D, H, W) – remember for final interpolation
         encoder_outputs = []  # Spatial (5D) feature maps, consumed by codebook/decoder loop
         encoder_pools = []  # Pooled (B, C) vectors, returned for contrastive loss

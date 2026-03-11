@@ -102,7 +102,7 @@ def save_checkpoint(path, model, optimizer, scheduler, scaler, step, best_val_lo
 
 
 def load_checkpoint(path, model, optimizer, scheduler, scaler, device):
-    ckpt = torch.load(path, map_location=device, weights_only=False)
+    ckpt = torch.load(path, map_location=device, weights_only=True)
     model.load_state_dict(ckpt["model"])
     optimizer.load_state_dict(ckpt["optimizer"])
     scheduler.load_state_dict(ckpt["scheduler"])
@@ -115,7 +115,7 @@ def load_checkpoint(path, model, optimizer, scheduler, scaler, device):
 
 def load_model_from_checkpoint(path, device="cpu"):
     """Recreate a VQVAE model from a training checkpoint (useful for eval/inference)."""
-    ckpt = torch.load(path, map_location=device, weights_only=False)
+    ckpt = torch.load(path, map_location=device, weights_only=True)
     a = ckpt.get("args", {})
     model = VQVAE(
         in_channels=1,
