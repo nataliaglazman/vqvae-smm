@@ -76,6 +76,11 @@ def parse_args() -> argparse.ArgumentParser:
         help="Trade compute for memory in residual blocks",
     )
     parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="Use torch.compile for fused kernels (PyTorch 2.0+, ~20-50%% faster)",
+    )
+    parser.add_argument(
         "--skip-recon-ratio",
         type=float,
         default=0.0,

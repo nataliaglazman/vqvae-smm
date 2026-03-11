@@ -106,10 +106,22 @@ class BaselineLoss(torch.nn.Module):
         self.perceptual_factor = 0.002
         self.n_slices = 32  # slices per orientation (32×3 = 96 total, batched in one LPIPS call)
         self.perceptual_function = LPIPS(net="squeeze")
+        # Freeze LPIPS — we never train it, so prevent PyTorch from
+        # allocating gradient buffers for its parameters.  This saves
+        # both memory and compute on every backward pass.
+        self.perceptual_function.eval()
+        for p in self.perceptual_function.parameters():
+            p.requires_grad_(False)
 
         self.fft_factor = 1.0
 
         self.summaries: Dict = {TBSummaryTypes.SCALAR: dict()}
+
+    def train(self, mode: bool = True):
+        """Override to keep LPIPS permanently in eval mode."""
+        super().train(mode)
+        self.perceptual_function.eval()
+        return self
 
     def forward(self, network_output: Dict[str, List[torch.Tensor]], y: torch.Tensor) -> torch.Tensor:
         # Unpacking elements
