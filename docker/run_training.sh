@@ -7,3 +7,5 @@ python /nfs/home/nglazman/vqvae-smm/train.py --model-id vqvae-feature-maps \
     --batch-size 4 \
     --lr 1e-4 \
     --train-steps 30000 \
+    --gradient-checkpointing \
+    --use-amp
