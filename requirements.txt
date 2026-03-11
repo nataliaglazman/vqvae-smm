@@ -1,0 +1,8 @@
+torch>=2.0
+monai>=1.3
+numpy
+pandas
+nibabel
+matplotlib
+lpips
+tensorboard
