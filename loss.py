@@ -1,9 +1,7 @@
 """Definition of loss functions."""
 
-from abc import ABC, abstractmethod
 from typing import Dict, List
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from lpips import LPIPS

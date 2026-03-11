@@ -10,7 +10,6 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-import nibabel as nib
 
 from config import parse_args
 from helper import get_device, get_parameter_count
@@ -425,10 +424,81 @@ def train(args):
     log.info(f"Done -- {step} steps in {time.time() - t0:.0f}s")
 
 
+def run_evaluation(args):
+    """Run full evaluation on the validation set using a trained checkpoint."""
+    device = get_device(args.no_cuda)
+    amp_enabled = args.use_amp and device.type == "cuda"
+
+    out_dir = Path(args.model_dir) / args.model_id
+    ckpt_path = args.checkpoint or (out_dir / "checkpoint_best.pt")
+    ckpt_path = Path(ckpt_path)
+    if not ckpt_path.exists():
+        log.error(f"Checkpoint not found: {ckpt_path}")
+        return
+
+    log.info(f"Loading checkpoint: {ckpt_path}")
+    model = load_model_from_checkpoint(str(ckpt_path), device)
+
+    # Build validation data
+    items = load_items(args.dataroot, args.csv_path)
+    if not items:
+        log.error("No data items found.")
+        return
+
+    det_transform, _ = build_transforms(
+        spacing=args.image_spacing, crop_margin=args.crop_margin,
+    )
+
+    if args.val_size < 1:
+        val_count = int(len(items) * args.val_size)
+    else:
+        val_count = int(args.val_size)
+    val_count = max(1, min(val_count, len(items) // 2))
+
+    np.random.seed(args.seed)
+    np.random.shuffle(items)
+    val_items = items[:val_count]
+    val_dicts = [{"image": it["image"]} for it in val_items]
+
+    val_set = build_cached_dataset(
+        val_dicts, det_transform, rand_transform=None,
+        cache_rate=1.0, num_workers=args.workers,
+    )
+    loader_kwargs = dict(
+        pin_memory=device.type == "cuda",
+        num_workers=args.workers,
+        persistent_workers=args.workers > 0,
+        prefetch_factor=2 if args.workers > 0 else None,
+    )
+    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, **loader_kwargs)
+
+    loss_fn = BaselineLoss().to(device)
+    log.info(f"Evaluating on {len(val_set)} samples...")
+
+    _, val_loss = validate(model, val_loader, loss_fn, device, amp_enabled)
+    log.info(f"Validation loss: {val_loss:.4f}")
+
+    # Log per-level codebook utilization
+    for i, codebook in enumerate(model.codebooks):
+        util = codebook.codebook_utilization()
+        log.info(f"  Codebook {i}: {util['active_codes']}/{codebook.n_embed} active "
+                 f"({util['utilization']:.1%}), perplexity={util['perplexity']:.1f}")
+
+    # Save example reconstructions
+    save_dir = Path(args.model_dir) / args.model_id / "eval_images"
+    save_dir.mkdir(exist_ok=True)
+    val_sample = next(iter(val_loader))
+    save_decoded_images(model=model, data=val_sample, args=args, step=0, save_dir=save_dir)
+    log.info(f"Example reconstructions saved → {save_dir}")
+
+
 def main():
     parser = parse_args()
     args = parser.parse_args()
-    train(args)
+    if args.evaluate:
+        run_evaluation(args)
+    else:
+        train(args)
 
 
 if __name__ == "__main__":

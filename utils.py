@@ -215,14 +215,12 @@ def save_decoded_images(model, data, args, step: int, save_dir: Path) -> None:
     """
     Encode then decode the first sample and write original + reconstruction as NIfTI files.
 
-    Only used in VAE mode (encoder + separate decoder).
-
     Args:
-        encoders: List of encoder models.
-        decoders: List of decoder models.
+        model: VQVAE model.
         data: Current batch dictionary (must contain key ``"image"``).
-        args: Parsed argument namespace (needs ``args.save_dir``).
+        args: Parsed argument namespace.
         step: Current training step (used in the output filename).
+        save_dir: Directory to save the NIfTI files.
     """
     import nibabel as nib
 
@@ -236,7 +234,6 @@ def save_decoded_images(model, data, args, step: int, save_dir: Path) -> None:
         original_np = img.squeeze().cpu().numpy()
 
         affine_2mm = np.diag([2.0, 2.0, 2.0, 1.0])
-        save_dir = os.path.join(save_dir)
         os.makedirs(save_dir, exist_ok=True)
 
         nib.save(

@@ -4,12 +4,10 @@
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
 import math
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-import matplotlib.patches as mpatches
 import argparse
 from pathlib import Path
 
@@ -70,23 +68,22 @@ def load_model_from_checkpoint(checkpoint_path, device="cpu"):
     return model
 
 
-def evaluate(args):
-    device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
+def run_evaluate(checkpoint, dataroot, device, spacing=2.0, batch_size=4):
+    """Run validation loss on all NIfTI images in a directory.
 
-    if not args.checkpoint:
-        raise ValueError("--checkpoint is required for evaluation")
-    model = load_model_from_checkpoint(args.checkpoint, device)
+    Can be called standalone or from the CLI via ``--mode evaluate``.
+    """
+    model = load_model_from_checkpoint(checkpoint, device)
 
-    data_dir = Path(args.dataroot)
-    image_files = list(data_dir.glob("**/*.nii.gz")) + list(data_dir.glob("**/*.nii"))
+    data_dir = Path(dataroot)
+    image_files = sorted(data_dir.glob("**/*.nii.gz")) + sorted(data_dir.glob("**/*.nii"))
     if not image_files:
         raise FileNotFoundError(f"No NIfTI files found in {data_dir}")
     data_dicts = [{"image": str(f)} for f in image_files]
 
-    spacing = args.spacing if hasattr(args, "spacing") else 2.0
     transforms = get_transforms(spacing=spacing)
     dataset = Dataset(data=data_dicts, transform=transforms)
-    dataloader = MonaiDataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+    dataloader = MonaiDataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
     loss_fn = BaselineLoss().to(device)
 
@@ -96,7 +93,7 @@ def evaluate(args):
     with torch.no_grad():
         for batch in dataloader:
             images = batch["image"].to(device)
-            recon, diffs, encoder_features, decoder_outputs, id_outputs = model(images)
+            recon, diffs, *_ = model(images)
 
             net_out = {"reconstruction": [recon], "quantization_losses": diffs}
             loss = loss_fn(net_out, images)
@@ -104,7 +101,16 @@ def evaluate(args):
             n += 1
 
     avg_loss = total_loss / max(n, 1)
-    print(f"Average Validation Loss: {avg_loss:.4f}")
+    print(f"Evaluated {n} batches ({len(image_files)} images)")
+    print(f"Average Loss: {avg_loss:.4f}")
+
+    # Codebook utilization
+    for i, codebook in enumerate(model.codebooks):
+        util = codebook.codebook_utilization()
+        print(f"  Codebook {i}: {util['active_codes']}/{codebook.n_embed} active "
+              f"({util['utilization']:.1%}), perplexity={util['perplexity']:.1f}")
+
+    return avg_loss
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -600,36 +606,44 @@ def compute_empirical_rf(model, input_tensor, level=0, position=None, channel=No
     """
     model.eval()
 
-    inp = input_tensor.clone().detach().requires_grad_(True)
+    # Freeze model parameters — we only need gradients w.r.t. the input
+    param_requires_grad = {}
+    for name, p in model.named_parameters():
+        param_requires_grad[name] = p.requires_grad
+        p.requires_grad_(False)
 
-    hook = FeatureHook()
-    handle = hook.register(model.encoders[level])
+    try:
+        inp = input_tensor.clone().detach().requires_grad_(True)
 
-    # Forward pass with gradients enabled (no torch.no_grad)
-    _ = model(inp)
+        hook = FeatureHook()
+        handle = hook.register(model.encoders[level])
 
-    feat = hook.output  # (1, C, D', H', W')
-    C, D, H, W = feat.shape[1], feat.shape[2], feat.shape[3], feat.shape[4]
+        # Forward pass with gradients enabled only for input
+        _ = model(inp)
 
-    if position is None:
-        d, h, w = D // 2, H // 2, W // 2
-    else:
-        d, h, w = position
+        feat = hook.output  # (1, C, D', H', W')
+        C, D, H, W = feat.shape[1], feat.shape[2], feat.shape[3], feat.shape[4]
 
-    if channel is not None:
-        target = feat[0, channel, d, h, w]
-    else:
-        target = feat[0, :, d, h, w].sum()
+        if position is None:
+            d, h, w = D // 2, H // 2, W // 2
+        else:
+            d, h, w = position
 
-    model.zero_grad()
-    if inp.grad is not None:
-        inp.grad.zero_()
-    target.backward()
+        if channel is not None:
+            target = feat[0, channel, d, h, w]
+        else:
+            target = feat[0, :, d, h, w].sum()
 
-    grad = inp.grad[0, 0].abs().detach().cpu().numpy()  # (D, H, W)
-    grad_norm = grad / (grad.max() + 1e-8)
+        target.backward()
 
-    handle.remove()
+        grad = inp.grad[0, 0].abs().detach().cpu().numpy()  # (D, H, W)
+        grad_norm = grad / (grad.max() + 1e-8)
+
+        handle.remove()
+    finally:
+        # Restore original requires_grad state
+        for name, p in model.named_parameters():
+            p.requires_grad_(param_requires_grad[name])
 
     return {
         "gradient_map": grad,
@@ -798,19 +812,41 @@ def plot_rf_comparison(rf_analytical, erf_results, input_slices, spacing=2.0, sa
 
 
 def main():
-    parser = argparse.ArgumentParser(description="VQ-VAE-2 evaluation and visualization")
-    parser.add_argument("--image", default=None, help="Path to input NIfTI image")
+    parser = argparse.ArgumentParser(
+        description="VQ-VAE-2 evaluation and visualization",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+modes:
+  evaluate       Compute validation loss + codebook utilization on a directory of NIfTI images
+  visualize      Feature map inspector (encoder grids, codebook heatmaps, reconstruction)
+  features       Export per-level feature maps as PNG + optional NIfTI
+  rf-analytical  Compute theoretical receptive field from model architecture
+  rf-empirical   Compute empirical receptive field via gradient backpropagation
+  rf-both        Combined analytical + empirical RF comparison
+
+examples:
+  python eval.py --mode evaluate --checkpoint results/vqvae/checkpoint_best.pt --dataroot /path/to/data
+  python eval.py --mode visualize --checkpoint ckpt.pt --image brain.nii.gz --save features.png
+  python eval.py --mode rf-both --checkpoint ckpt.pt --image brain.nii.gz --save rf.png
+""",
+    )
     parser.add_argument("--checkpoint", default=None, help="Path to model .pt checkpoint")
-    parser.add_argument("--save", default=None, help="Save figure to this path instead of showing")
     parser.add_argument("--device", default="cpu", help="cuda / mps / cpu")
     parser.add_argument("--spacing", type=float, default=2.0, help="Isotropic voxel spacing in mm")
     parser.add_argument(
         "--mode", default="visualize",
-        choices=["visualize", "features", "rf-analytical", "rf-empirical", "rf-both"],
-        help="Analysis mode",
+        choices=["evaluate", "visualize", "features", "rf-analytical", "rf-empirical", "rf-both"],
+        help="Analysis mode (default: visualize)",
     )
+    # Evaluate mode
+    parser.add_argument("--dataroot", default=None, help="Data directory for evaluate mode")
+    parser.add_argument("--batch-size", type=int, default=4, help="Batch size for evaluate mode")
+    # Visualization modes
+    parser.add_argument("--image", default=None, help="Path to input NIfTI image")
+    parser.add_argument("--save", default=None, help="Save figure to this path instead of showing")
     parser.add_argument("--save-dir", default=None, help="Directory for saving feature maps")
     parser.add_argument("--save-nifti", action="store_true", help="Export feature maps as NIfTI")
+    # RF options
     parser.add_argument("--rf-level", type=int, default=None,
                         help="Encoder level for empirical RF (None = all levels)")
     parser.add_argument("--rf-position", type=int, nargs=3, default=None,
@@ -821,6 +857,16 @@ def main():
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
+
+    # ── evaluate: runs loss on a directory of images ─────────────────────────
+    if args.mode == "evaluate":
+        if not args.checkpoint:
+            parser.error("--checkpoint is required for evaluate mode")
+        if not args.dataroot:
+            parser.error("--dataroot is required for evaluate mode")
+        run_evaluate(args.checkpoint, args.dataroot, device,
+                     spacing=args.spacing, batch_size=args.batch_size)
+        return
 
     # Load model
     print("Loading model…")

@@ -1,5 +1,4 @@
 import torch
-import torchvision
 
 class HelperModule(torch.nn.Module):
     def __init__(self, *args, **kwargs):

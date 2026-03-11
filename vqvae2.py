@@ -1,4 +1,3 @@
-import copy
 from math import log2
 from typing import Tuple
 
@@ -159,7 +158,7 @@ class CodeLayer(HelperModule):
         self.register_buffer("embed_avg", embed.clone())
 
     @torch.cuda.amp.autocast(enabled=False)
-    def forward(self, x: torch.FloatTensor) -> Tuple[torch.FloatTensor, float, torch.LongTensor]:
+    def forward(self, x: torch.FloatTensor) -> Tuple[torch.FloatTensor, torch.Tensor, torch.LongTensor]:
         # x: (B, C, D, H, W) -> (B, D, H, W, embed_dim)
         x = self.conv_in(x.float()).permute(0, 2, 3, 4, 1)
         flatten = x.reshape(-1, self.dim)
@@ -261,6 +260,7 @@ class VQVAE(HelperModule):
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
+        self.in_channels = in_channels
         self.encoders = nn.ModuleList(
             [
                 Encoder(
@@ -323,32 +323,27 @@ class VQVAE(HelperModule):
             rates = scaling_rates[1 : len(scaling_rates) - i][::-1]  # noqa: E203
             self.upscalers.append(Upscaler(embed_dim, rates))
 
-    def forward(self, x, return_recon=True, pool_only=False, n_views=1, subsets=None):
+    def forward(self, x, return_recon=True, pool_only=False):
         """Forward pass through VQ-VAE-2.
 
         Args:
             x: Input tensor (B, C, D, H, W)
-            return_recon: If False, skip decoder for memory efficiency (contrastive-only mode)
-            pool_only: If True, return per-level pooled (B, C) vectors instead of spatial maps.
-            n_views: Number of views (required when content_proj is active).
-            subsets: View subsets for Gumbel mask (required when content_proj is active).
+            return_recon: If False, skip decoder for memory efficiency (codebook-only mode)
+            pool_only: If True, return per-level global-average-pooled (B, C) vectors
+                       instead of spatial maps.
 
         Returns:
             final_output: Reconstruction (or None if return_recon=False)
             diffs: VQ commitment losses per level
             encoder_features: Per-level encoder features.
                               If pool_only=True:  list of (B, C) pooled vectors
-                                  Level 0 has content_channels dims (masked),
-                                  levels 1+ have hidden_channels dims.
                               If pool_only=False: list of (B, C, D, H, W) spatial maps
-            estimated_content_indices: Content channel indices from the Gumbel mask
-                                       (None if content_proj not configured)
             decoder_outputs: Decoder features per level (or empty list)
             id_outputs: Codebook indices per level
         """
         assert x.ndim == 5, f"Expected 5D input (B, C, D, H, W), got {x.ndim}D with shape {x.shape}"
-        assert x.shape[1] == self.encoders[0].layers[0][0].in_channels, (
-            f"Expected {self.encoders[0].layers[0][0].in_channels} input channels, got {x.shape[1]}"
+        assert x.shape[1] == self.in_channels, (
+            f"Expected {self.in_channels} input channels, got {x.shape[1]}"
         )
         input_shape = x.shape[2:]  # (D, H, W) – remember for final interpolation
         encoder_outputs = []  # Spatial (5D) feature maps, consumed by codebook/decoder loop
@@ -359,14 +354,16 @@ class VQVAE(HelperModule):
         id_outputs = []
         diffs = []
         # Encoder forward pass
-        enc_input = x
         for enc in self.encoders:
             if len(encoder_outputs):
                 encoder_outputs.append(enc(encoder_outputs[-1]))
             else:
                 encoder_outputs.append(enc(x))
+            if pool_only:
+                # Global average pool: (B, C, D, H, W) -> (B, C)
+                encoder_pools.append(encoder_outputs[-1].mean(dim=[2, 3, 4]))
 
-        del x, enc_input
+        del x
 
         for l in range(self.nb_levels - 1, -1, -1):
             codebook = self.codebooks[l]

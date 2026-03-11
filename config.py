@@ -2,8 +2,6 @@
 """Argument parsing and dataset-specific configuration for multiview-CRL."""
 
 import argparse
-import functools
-import operator
 
 import numpy as np
 
@@ -26,7 +24,11 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--train-steps", type=int, default=300001)
     parser.add_argument("--log-steps", type=int, default=100)
     parser.add_argument("--checkpoint-steps", type=int, default=1000)
-    parser.add_argument("--evaluate", action="store_true")
+    parser.add_argument("--evaluate", action="store_true", help="Run evaluation instead of training")
+    parser.add_argument(
+        "--checkpoint", type=str, default=None,
+        help="Path to checkpoint for evaluation (defaults to checkpoint_best.pt in model dir)",
+    )
     parser.add_argument(
         "--val-size", default=0.15, type=float,
         help="Validation fraction (0-1) or absolute count (>=1)",
