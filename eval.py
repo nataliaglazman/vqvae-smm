@@ -2,6 +2,7 @@
 # - Add classifiers for downstream tasks (e.g. AD vs CN, MCI vs CN, etc.)
 # - Add Dan's methods for segmentations
 
+import random
 import torch
 import torch.nn as nn
 import math
@@ -248,6 +249,27 @@ def _load_volume(path, spacing=2.0):
 def _tensor_to_display(vol: torch.Tensor) -> dict:
     """Convert a (1, 1, D, H, W) reconstruction tensor to display slices."""
     return volume_to_slices(vol)
+
+
+def _sample_random_image(dataroot, seed=None):
+    """Pick a random NIfTI file from a data directory.
+
+    Args:
+        dataroot: Root directory to search recursively for .nii/.nii.gz files.
+        seed: Optional random seed for reproducibility.
+
+    Returns:
+        Path string of the randomly selected image.
+    """
+    data_dir = Path(dataroot)
+    image_files = sorted(data_dir.glob("**/*.nii.gz")) + sorted(data_dir.glob("**/*.nii"))
+    if not image_files:
+        raise FileNotFoundError(f"No NIfTI files found in {data_dir}")
+    if seed is not None:
+        random.seed(seed)
+    chosen = random.choice(image_files)
+    print(f"Randomly sampled: {chosen} (from {len(image_files)} images)")
+    return str(chosen)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -825,9 +847,10 @@ modes:
   rf-both        Combined analytical + empirical RF comparison
 
 examples:
-  python eval.py --mode evaluate --checkpoint results/vqvae/checkpoint_best.pt --dataroot /path/to/data
+  python eval.py --mode evaluate --checkpoint ckpt.pt --dataroot /path/to/data
   python eval.py --mode visualize --checkpoint ckpt.pt --image brain.nii.gz --save features.png
-  python eval.py --mode rf-both --checkpoint ckpt.pt --image brain.nii.gz --save rf.png
+  python eval.py --mode visualize --checkpoint ckpt.pt --dataroot /path/to/data --save features.png
+  python eval.py --mode rf-both --checkpoint ckpt.pt --dataroot /path/to/data --seed 42 --save rf.png
 """,
     )
     parser.add_argument("--checkpoint", default=None, help="Path to model .pt checkpoint")
@@ -838,11 +861,15 @@ examples:
         choices=["evaluate", "visualize", "features", "rf-analytical", "rf-empirical", "rf-both"],
         help="Analysis mode (default: visualize)",
     )
-    # Evaluate mode
-    parser.add_argument("--dataroot", default=None, help="Data directory for evaluate mode")
+    # Data source
+    parser.add_argument("--dataroot", default=None,
+                        help="Data directory (for evaluate mode, or to randomly sample an image)")
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size for evaluate mode")
     # Visualization modes
-    parser.add_argument("--image", default=None, help="Path to input NIfTI image")
+    parser.add_argument("--image", default=None,
+                        help="Path to input NIfTI image (if omitted, randomly samples from --dataroot)")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed for reproducible image sampling")
     parser.add_argument("--save", default=None, help="Save figure to this path instead of showing")
     parser.add_argument("--save-dir", default=None, help="Directory for saving feature maps")
     parser.add_argument("--save-nifti", action="store_true", help="Export feature maps as NIfTI")
@@ -882,18 +909,25 @@ examples:
     if args.mode == "rf-analytical":
         rf_result = compute_analytical_rf(model)
         print_rf_summary(rf_result, spacing=args.spacing)
-        if args.image:
-            _, input_slices = _load_volume(args.image, spacing=args.spacing)
+        img_path = args.image
+        if not img_path and args.dataroot:
+            img_path = _sample_random_image(args.dataroot, seed=args.seed)
+        if img_path:
+            _, input_slices = _load_volume(img_path, spacing=args.spacing)
             plot_analytical_rf(rf_result, input_slices, spacing=args.spacing,
                                save_path=args.save)
         return
 
-    # All other modes require an image
-    if not args.image:
-        parser.error("--image is required for this mode")
+    # All other modes require an image — resolve from --image or --dataroot
+    image_path = args.image
+    if not image_path:
+        if args.dataroot:
+            image_path = _sample_random_image(args.dataroot, seed=args.seed)
+        else:
+            parser.error("--image or --dataroot is required for this mode")
 
-    print(f"Loading image: {args.image}")
-    img_tensor, input_slices = _load_volume(args.image, spacing=args.spacing)
+    print(f"Loading image: {image_path}")
+    img_tensor, input_slices = _load_volume(image_path, spacing=args.spacing)
     img_tensor = img_tensor.to(device)
 
     if args.mode == "visualize":
