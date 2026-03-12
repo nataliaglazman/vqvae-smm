@@ -102,6 +102,7 @@ class BaselineLoss(torch.nn.Module):
         super(BaselineLoss, self).__init__()
 
         self.pixel_factor = 1.0
+        self.gdl_factor = 1.0
 
         self.perceptual_factor = 1.0
         self.n_slices = 32  # slices per orientation (32×3 = 96 total, batched in one LPIPS call)
@@ -133,6 +134,7 @@ class BaselineLoss(torch.nn.Module):
             self._calculate_pixel_loss(x, y)
             + self._calculate_frequency_loss(x, y)
             + self._calculate_perceptual_loss(x, y)
+            + self._calculate_gdl(x, y)
         )
 
         for idx, q_loss in enumerate(q_losses):
@@ -229,6 +231,25 @@ class BaselineLoss(torch.nn.Module):
         loss = (p_sag + p_ax + p_cor) * self.perceptual_factor
         self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual-Reconstruction"] = loss
 
+        return loss
+
+    def _calculate_gdl(self, x, y) -> torch.Tensor:
+        """Gradient Domain Loss — penalizes differences in spatial gradients to sharpen edges."""
+        dx_x = x[:, :, :, :, 1:] - x[:, :, :, :, :-1]
+        dy_x = x[:, :, :, 1:, :] - x[:, :, :, :-1, :]
+        dz_x = x[:, :, 1:, :, :] - x[:, :, :-1, :, :]
+
+        dx_y = y[:, :, :, :, 1:] - y[:, :, :, :, :-1]
+        dy_y = y[:, :, :, 1:, :] - y[:, :, :, :-1, :]
+        dz_y = y[:, :, 1:, :, :] - y[:, :, :-1, :, :]
+
+        loss = (
+            F.l1_loss(dx_x, dx_y)
+            + F.l1_loss(dy_x, dy_y)
+            + F.l1_loss(dz_x, dz_y)
+        ) * self.gdl_factor
+
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-GDL-Reconstruction"] = loss
         return loss
 
     def get_summaries(self) -> Dict[str, torch.Tensor]:
