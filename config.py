@@ -20,7 +20,7 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--encoding-size", type=int, default=256)
     parser.add_argument("--tau", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=1e-5)
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--train-steps", type=int, default=300001)
     parser.add_argument("--log-steps", type=int, default=100)
     parser.add_argument("--checkpoint-steps", type=int, default=1000)
