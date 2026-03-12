@@ -113,7 +113,7 @@ class BaselineLoss(torch.nn.Module):
         for p in self.perceptual_function.parameters():
             p.requires_grad_(False)
 
-        self.fft_factor = 1.0
+        self.fft_factor = 10.0
 
         self.summaries: Dict = {TBSummaryTypes.SCALAR: dict()}
 
