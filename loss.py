@@ -103,7 +103,7 @@ class BaselineLoss(torch.nn.Module):
 
         self.pixel_factor = 1.0
 
-        self.perceptual_factor = 0.002
+        self.perceptual_factor = 1.0
         self.n_slices = 32  # slices per orientation (32×3 = 96 total, batched in one LPIPS call)
         self.perceptual_function = LPIPS(net="squeeze")
         # Freeze LPIPS — we never train it, so prevent PyTorch from
