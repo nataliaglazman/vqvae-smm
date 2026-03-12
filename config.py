@@ -16,7 +16,7 @@ def parse_args() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataroot", type=str, default="/nfs/home/nglazman/ADNI_registered")
     parser.add_argument("--model-dir", type=str, default="results")
-    parser.add_argument("--model-id", type=str, default="vqvae")
+    parser.add_argument("--model-id", type=str, default="vqvae-upscaled-improved")
     parser.add_argument("--encoding-size", type=int, default=256)
     parser.add_argument("--tau", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=1e-5)
