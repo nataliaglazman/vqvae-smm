@@ -1,4 +1,4 @@
-runai submit --name vqvae-smm \
+runai submit --name vqvae-smm-stripped \
  -i aicregistry:5000/nglazman:vqvae-base \
  --node-type A100 \
  --run-as-user \
