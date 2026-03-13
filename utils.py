@@ -224,24 +224,29 @@ def save_decoded_images(model, data, args, step: int, save_dir: Path) -> None:
     """
     import nibabel as nib
 
+    device = next(model.parameters()).device
+    amp_enabled = device.type == "cuda" and getattr(args, "use_amp", False)
+
     with torch.no_grad():
         samples = data["image"]
         img = samples[0:1]  # (1, C, D, H, W) — first sample, keep batch dim
 
-        decoded = model(img.to(next(model.parameters()).device), return_recon=True)[0]
+        with torch.amp.autocast("cuda", enabled=amp_enabled):
+            decoded = model(img.to(device), return_recon=True)[0]
 
-        decoded_np = decoded.squeeze().cpu().numpy()
+        decoded_np = decoded.float().squeeze().cpu().numpy()
         original_np = img.squeeze().cpu().numpy()
 
-        affine_2mm = np.diag([2.0, 2.0, 2.0, 1.0])
+        spacing = getattr(args, "image_spacing", 2.0)
+        affine = np.diag([spacing, spacing, spacing, 1.0])
         os.makedirs(save_dir, exist_ok=True)
 
         nib.save(
-            nib.Nifti1Image(original_np, affine=affine_2mm),
+            nib.Nifti1Image(original_np, affine=affine),
             f"{save_dir}/step_{step:05d}_original.nii.gz",
         )
         nib.save(
-            nib.Nifti1Image(decoded_np, affine=affine_2mm),
+            nib.Nifti1Image(decoded_np, affine=affine),
             f"{save_dir}/step_{step:05d}_decoded.nii.gz",
         )
         print(f"[SAVED] Decoded images at step {step} to {save_dir}/", flush=True)

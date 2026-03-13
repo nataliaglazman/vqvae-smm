@@ -5,4 +5,4 @@ python /nfs/home/nglazman/vqvae-smm/eval.py --mode evaluate \
     --dataroot /nfs/home/nglazman/ADNI_stripped \
     --checkpoint /nfs/home/nglazman/results/vqvae-stripped/checkpoint_latest.pt \
     --device cuda \
-    --image-spacing 1.0 \
+    --spacing 1.0 \
