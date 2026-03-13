@@ -145,7 +145,7 @@ def validate(model, loader, loss_fn, device, amp_enabled):
         if first_batch is None:
             first_batch = batch  # keep for decoded-image saving (avoids re-spawning workers)
         images = batch["image"].to(device)
-        with torch.cuda.amp.autocast(enabled=amp_enabled):
+        with torch.amp.autocast("cuda", enabled=amp_enabled):
             recon, diffs, *_ = model(images)
             loss = loss_fn({"reconstruction": [recon], "quantization_losses": diffs}, images)
         total += loss.item()
@@ -286,7 +286,7 @@ def train(args):
         optimizer, schedulers=[warmup_scheduler, cosine_scheduler],
         milestones=[warmup_steps],
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
     # ── Resume ────────────────────────────────────────────────────────────────
     start_step = 0
@@ -330,7 +330,7 @@ def train(args):
             # Optionally skip reconstruction for memory / codebook-only steps
             skip_recon = args.skip_recon_ratio > 0 and random.random() < args.skip_recon_ratio
 
-            with torch.cuda.amp.autocast(enabled=amp_enabled):
+            with torch.amp.autocast("cuda", enabled=amp_enabled):
                 recon, diffs, *_ = model(images, return_recon=not skip_recon)
                 if skip_recon:
                     loss = sum(diffs) * args.vq_commitment_weight

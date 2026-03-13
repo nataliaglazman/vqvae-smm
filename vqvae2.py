@@ -157,7 +157,7 @@ class CodeLayer(HelperModule):
         self.register_buffer("cluster_size", torch.zeros(nb_entries, dtype=torch.float32))
         self.register_buffer("embed_avg", embed.clone())
 
-    @torch.cuda.amp.autocast(enabled=False)
+    @torch.amp.autocast("cuda", enabled=False)
     def forward(self, x: torch.FloatTensor) -> Tuple[torch.FloatTensor, torch.Tensor, torch.LongTensor]:
         # x: (B, C, D, H, W) -> (B, D, H, W, embed_dim)
         x = self.conv_in(x.float()).permute(0, 2, 3, 4, 1)

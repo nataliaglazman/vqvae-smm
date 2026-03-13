@@ -152,7 +152,7 @@ class BaselineLoss(torch.nn.Module):
         # When the volume exceeds *max_voxels*, we downsample to a manageable
         # size first — the frequency loss is still meaningful at lower
         # resolution and the memory saving is dramatic.
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             # fftn requires float32; x/y may be float16 under AMP
             x_f = (x.float() + 1.0) / 2.0
             y_f = (y.float() + 1.0) / 2.0
