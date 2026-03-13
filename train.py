@@ -126,7 +126,10 @@ def load_model_from_checkpoint(path, device="cpu"):
         scaling_rates=a.get("vqvae_scaling_rates", [2, 2, 2]),
         use_checkpoint=False,
     ).to(device)
-    model.load_state_dict(ckpt["model"])
+    # Strip _orig_mod. prefix added by torch.compile
+    state_dict = {k.removeprefix("_orig_mod."): v for k, v in ckpt["model"].items()}
+    model.load_state_dict(state_dict)
+    model.eval()
     return model
 
 
