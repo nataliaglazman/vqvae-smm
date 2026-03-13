@@ -141,13 +141,18 @@ def validate(model, loader, loss_fn, device, amp_enabled):
     model.eval()
     total, n = 0.0, 0
     first_batch = None
+    # Run validation in eager mode regardless of whether torch.compile is active.
+    # The inductor backend recompiles for eval-mode (different BatchNorm graph) and
+    # that recompilation requires a C compiler — which may not be on PATH in cluster
+    # environments.  Eager mode is fast enough for a validation pass.
+    _model_eval = torch._dynamo.disable(model) if hasattr(torch, "_dynamo") else model
     for batch in loader:
         if first_batch is None:
             first_batch = batch  # keep for decoded-image saving (avoids re-spawning workers)
         images = batch["image"].to(device, non_blocking=True)
         images = images.to(memory_format=torch.channels_last_3d)
         with torch.amp.autocast("cuda", enabled=amp_enabled):
-            recon, diffs, *_ = model(images)
+            recon, diffs, *_ = _model_eval(images)
             loss = loss_fn({"reconstruction": [recon], "quantization_losses": diffs}, images)
         total += loss.item()
         n += 1
@@ -277,8 +282,8 @@ def train(args):
 
     # torch.compile (PyTorch 2.0+): fuses ops, reduces kernel launches.
     if args.compile:
-        log.info("Compiling model with torch.compile (first step will be slow)…")
-        model = torch.compile(model)
+        log.info(f"Compiling model with torch.compile (backend={args.compile_backend}, first step will be slow)…")
+        model = torch.compile(model, backend=args.compile_backend)
 
     # ── Loss / optimiser / scheduler ──────────────────────────────────────────
     loss_fn = BaselineLoss(commitment_weight=args.vq_commitment_weight).to(device)

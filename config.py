@@ -114,6 +114,13 @@ def parse_args() -> argparse.ArgumentParser:
         help="Use torch.compile for fused kernels (PyTorch 2.0+, ~20-50%% faster)",
     )
     parser.add_argument(
+        "--compile-backend",
+        type=str,
+        default="inductor",
+        help="torch.compile backend. Use 'inductor' (default, fastest, needs gcc) or "
+             "'aot_eager' (no C compiler required, useful on clusters without gcc).",
+    )
+    parser.add_argument(
         "--skip-recon-ratio",
         type=float,
         default=0.0,
