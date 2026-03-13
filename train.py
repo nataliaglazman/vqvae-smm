@@ -194,16 +194,25 @@ def train(args):
         spacing=args.image_spacing, crop_margin=args.crop_margin,
     )
 
-    # Train / val split
+    # Train / val split (stratified by class label)
     if args.val_size < 1:
         val_count = int(len(items) * args.val_size)
     else:
         val_count = int(args.val_size)
     val_count = max(1, min(val_count, len(items) // 2))
 
-    np.random.shuffle(items)
-    train_items = items[val_count:]
-    val_items = items[:val_count]
+    rng = np.random.RandomState(args.seed)
+    labels = np.array([it["label"] for it in items])
+    unique_labels = np.unique(labels)
+    train_items, val_items = [], []
+    for lbl in unique_labels:
+        lbl_indices = np.where(labels == lbl)[0]
+        rng.shuffle(lbl_indices)
+        n_val = max(1, int(len(lbl_indices) * val_count / len(items)))
+        val_items.extend(items[i] for i in lbl_indices[:n_val])
+        train_items.extend(items[i] for i in lbl_indices[n_val:])
+    rng.shuffle(train_items)
+    rng.shuffle(val_items)
 
     # Build MONAI data dicts (CacheDataset expects list-of-dicts with file paths)
     train_dicts = [{"image": it["image"]} for it in train_items]
@@ -258,6 +267,7 @@ def train(args):
         nb_entries=args.vqvae_nb_entries,
         scaling_rates=args.vqvae_scaling_rates,
         use_checkpoint=args.gradient_checkpointing,
+        entropy_weight=args.entropy_weight,
     ).to(device)
     log.info(f"Parameters: {get_parameter_count(model):,}")
 
@@ -270,7 +280,7 @@ def train(args):
         model = torch.compile(model)
 
     # ── Loss / optimiser / scheduler ──────────────────────────────────────────
-    loss_fn = BaselineLoss().to(device)
+    loss_fn = BaselineLoss(commitment_weight=args.vq_commitment_weight).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     total_opt_steps = max(args.train_steps // args.gradient_accumulation_steps, 1)
@@ -473,9 +483,16 @@ def run_evaluation(args):
         val_count = int(args.val_size)
     val_count = max(1, min(val_count, len(items) // 2))
 
-    np.random.seed(args.seed)
-    np.random.shuffle(items)
-    val_items = items[:val_count]
+    rng = np.random.RandomState(args.seed)
+    labels = np.array([it["label"] for it in items])
+    unique_labels = np.unique(labels)
+    val_items = []
+    for lbl in unique_labels:
+        lbl_indices = np.where(labels == lbl)[0]
+        rng.shuffle(lbl_indices)
+        n_val = max(1, int(len(lbl_indices) * val_count / len(items)))
+        val_items.extend(items[i] for i in lbl_indices[:n_val])
+    rng.shuffle(val_items)
     val_dicts = [{"image": it["image"]} for it in val_items]
 
     val_set = build_cached_dataset(
@@ -490,7 +507,7 @@ def run_evaluation(args):
     )
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, **loader_kwargs)
 
-    loss_fn = BaselineLoss().to(device)
+    loss_fn = BaselineLoss(commitment_weight=args.vq_commitment_weight).to(device)
     log.info(f"Evaluating on {len(val_set)} samples...")
 
     val_sample, val_loss = validate(model, val_loader, loss_fn, device, amp_enabled)

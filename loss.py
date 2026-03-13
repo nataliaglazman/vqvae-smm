@@ -98,7 +98,7 @@ class BaurLoss(object):
 
 
 class BaselineLoss(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, commitment_weight: float = 0.25):
         super(BaselineLoss, self).__init__()
 
         self.pixel_factor = 1.0
@@ -115,6 +115,7 @@ class BaselineLoss(torch.nn.Module):
             p.requires_grad_(False)
 
         self.fft_factor = 10.0
+        self.commitment_weight = commitment_weight
 
         self.summaries: Dict = {TBSummaryTypes.SCALAR: dict()}
 
@@ -124,17 +125,17 @@ class BaselineLoss(torch.nn.Module):
         self.perceptual_function.eval()
         return self
 
-    def forward(self, network_output: Dict[str, List[torch.Tensor]], y: torch.Tensor) -> torch.Tensor:
-        # Unpacking elements
-        x = y.float()
-        y = network_output["reconstruction"][0].float()
+    def forward(self, network_output: Dict[str, List[torch.Tensor]], target: torch.Tensor) -> torch.Tensor:
+        # gt = ground truth, recon = reconstruction
+        gt = target.float()
+        recon = network_output["reconstruction"][0].float()
         q_losses = network_output["quantization_losses"]
 
         loss = (
-            self._calculate_pixel_loss(x, y)
-            + self._calculate_frequency_loss(x, y)
-            + self._calculate_perceptual_loss(x, y)
-            + self._calculate_gdl(x, y)
+            self._calculate_pixel_loss(gt, recon)
+            + self._calculate_frequency_loss(gt, recon)
+            + self._calculate_perceptual_loss(gt, recon)
+            + self._calculate_gdl(gt, recon)
         )
 
         for idx, q_loss in enumerate(q_losses):
@@ -142,43 +143,43 @@ class BaselineLoss(torch.nn.Module):
 
             self.summaries[TBSummaryTypes.SCALAR][f"Loss-MSE-VQ{idx}_Commitment_Cost"] = q_loss
 
-            loss = loss + q_loss
+            loss = loss + q_loss * self.commitment_weight
 
         return loss
 
-    def _calculate_frequency_loss(self, x, y, max_voxels: int = 128**3) -> torch.Tensor:
+    def _calculate_frequency_loss(self, gt, recon, max_voxels: int = 128**3) -> torch.Tensor:
         # Compute FFT on the batch.  For large 3D volumes the full-resolution
         # rfftn and its backward graph consume several GB of GPU memory.
         # When the volume exceeds *max_voxels*, we downsample to a manageable
         # size first — the frequency loss is still meaningful at lower
         # resolution and the memory saving is dramatic.
         with torch.amp.autocast("cuda", enabled=False):
-            # fftn requires float32; x/y may be float16 under AMP
-            x_f = (x.float() + 1.0) / 2.0
-            y_f = (y.float() + 1.0) / 2.0
+            # fftn requires float32; gt/recon may be float16 under AMP
+            gt_f = (gt.float() + 1.0) / 2.0
+            recon_f = (recon.float() + 1.0) / 2.0
 
-            n_voxels = x_f[0, 0].numel()
+            n_voxels = gt_f[0, 0].numel()
             if n_voxels > max_voxels:
                 scale = (max_voxels / n_voxels) ** (1.0 / 3.0)
-                target = [max(1, int(s * scale)) for s in x_f.shape[2:]]
-                x_f = F.interpolate(x_f, size=target, mode="trilinear", align_corners=False)
-                y_f = F.interpolate(y_f, size=target, mode="trilinear", align_corners=False)
+                target = [max(1, int(s * scale)) for s in gt_f.shape[2:]]
+                gt_f = F.interpolate(gt_f, size=target, mode="trilinear", align_corners=False)
+                recon_f = F.interpolate(recon_f, size=target, mode="trilinear", align_corners=False)
 
-            loss = F.mse_loss(torch.abs(rfftn(x_f, norm="ortho")), torch.abs(rfftn(y_f, norm="ortho"))).to(x.dtype)
+            loss = F.mse_loss(torch.abs(rfftn(gt_f, norm="ortho")), torch.abs(rfftn(recon_f, norm="ortho"))).to(gt.dtype)
 
         loss = loss * self.fft_factor
         self.summaries[TBSummaryTypes.SCALAR]["Loss-Jukebox-Reconstruction"] = loss
 
         return loss
 
-    def _calculate_pixel_loss(self, x, y) -> torch.Tensor:
-        loss = F.l1_loss(x, y)
+    def _calculate_pixel_loss(self, gt, recon) -> torch.Tensor:
+        loss = F.l1_loss(gt, recon)
         loss = loss * self.pixel_factor
         self.summaries[TBSummaryTypes.SCALAR]["Loss-MAE-Reconstruction"] = loss
 
         return loss
 
-    def _calculate_perceptual_loss(self, x, y) -> torch.Tensor:
+    def _calculate_perceptual_loss(self, gt, recon) -> torch.Tensor:
         # Batched perceptual loss across 3 orientations.
         #
         # Collects random slices from sagittal, coronal and axial planes,
@@ -187,11 +188,11 @@ class BaselineLoss(torch.nn.Module):
         # approach with 128 slices each, this is ~4× faster and uses ~4×
         # less backprop memory.
         #
-        # Gradient note: x (ground truth) is detached so only y
+        # Gradient note: gt (ground truth) is detached so only recon
         # (reconstruction) carries gradients back to the decoder.
 
         common_size = (96, 96)
-        all_x, all_y = [], []
+        all_gt, all_recon = [], []
         counts = []  # slices per orientation, for splitting later
 
         for perm in [
@@ -199,27 +200,27 @@ class BaselineLoss(torch.nn.Module):
             (0, 4, 1, 2, 3),  # axial     – slice along W
             (0, 3, 1, 2, 4),  # coronal   – slice along H
         ]:
-            x_p = x.permute(*perm)  # (B, N_total, C, H', W')
-            y_p = y.permute(*perm)
-            n_total = x_p.shape[1]
+            gt_p = gt.permute(*perm)  # (B, N_total, C, H', W')
+            recon_p = recon.permute(*perm)
+            n_total = gt_p.shape[1]
             n_sel = min(self.n_slices, n_total)
-            idx = torch.randperm(n_total, device=x.device)[:n_sel]
+            idx = torch.randperm(n_total, device=gt.device)[:n_sel]
 
-            sx = x_p[:, idx].flatten(0, 1)  # (B*n_sel, C, h, w)
-            sy = y_p[:, idx].flatten(0, 1)
+            s_gt = gt_p[:, idx].flatten(0, 1)  # (B*n_sel, C, h, w)
+            s_recon = recon_p[:, idx].flatten(0, 1)
 
             # Resize to common dims so we can cat across orientations
-            sx = F.interpolate(sx, size=common_size, mode="bilinear", align_corners=False).detach()
-            sy = F.interpolate(sy, size=common_size, mode="bilinear", align_corners=False)
+            s_gt = F.interpolate(s_gt, size=common_size, mode="bilinear", align_corners=False).detach()
+            s_recon = F.interpolate(s_recon, size=common_size, mode="bilinear", align_corners=False)
 
-            all_x.append(sx)
-            all_y.append(sy)
-            counts.append(sx.shape[0])
+            all_gt.append(s_gt)
+            all_recon.append(s_recon)
+            counts.append(s_gt.shape[0])
 
         # ── Single LPIPS forward pass ────────────────────────────────
-        cat_x = torch.cat(all_x, dim=0).float()
-        cat_y = torch.cat(all_y, dim=0).float()
-        per_slice = self.perceptual_function.forward(cat_x, cat_y).view(-1)
+        cat_gt = torch.cat(all_gt, dim=0).float()
+        cat_recon = torch.cat(all_recon, dim=0).float()
+        per_slice = self.perceptual_function.forward(cat_gt, cat_recon).view(-1)
 
         # Split back for per-orientation logging
         p_sag, p_ax, p_cor = [s.mean() for s in per_slice.split(counts)]
@@ -233,20 +234,20 @@ class BaselineLoss(torch.nn.Module):
 
         return loss
 
-    def _calculate_gdl(self, x, y) -> torch.Tensor:
+    def _calculate_gdl(self, gt, recon) -> torch.Tensor:
         """Gradient Domain Loss — penalizes differences in spatial gradients to sharpen edges."""
-        dx_x = x[:, :, :, :, 1:] - x[:, :, :, :, :-1]
-        dy_x = x[:, :, :, 1:, :] - x[:, :, :, :-1, :]
-        dz_x = x[:, :, 1:, :, :] - x[:, :, :-1, :, :]
+        dx_gt = gt[:, :, :, :, 1:] - gt[:, :, :, :, :-1]
+        dy_gt = gt[:, :, :, 1:, :] - gt[:, :, :, :-1, :]
+        dz_gt = gt[:, :, 1:, :, :] - gt[:, :, :-1, :, :]
 
-        dx_y = y[:, :, :, :, 1:] - y[:, :, :, :, :-1]
-        dy_y = y[:, :, :, 1:, :] - y[:, :, :, :-1, :]
-        dz_y = y[:, :, 1:, :, :] - y[:, :, :-1, :, :]
+        dx_recon = recon[:, :, :, :, 1:] - recon[:, :, :, :, :-1]
+        dy_recon = recon[:, :, :, 1:, :] - recon[:, :, :, :-1, :]
+        dz_recon = recon[:, :, 1:, :, :] - recon[:, :, :-1, :, :]
 
         loss = (
-            F.l1_loss(dx_x, dx_y)
-            + F.l1_loss(dy_x, dy_y)
-            + F.l1_loss(dz_x, dz_y)
+            F.l1_loss(dx_gt, dx_recon)
+            + F.l1_loss(dy_gt, dy_recon)
+            + F.l1_loss(dz_gt, dz_recon)
         ) * self.gdl_factor
 
         self.summaries[TBSummaryTypes.SCALAR]["Loss-GDL-Reconstruction"] = loss

@@ -71,6 +71,11 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--vqvae-scaling-rates", type=int, nargs="+", default=[2, 2, 2])
     parser.add_argument("--vq-commitment-weight", type=float, default=0.25)
     parser.add_argument(
+        "--entropy-weight", type=float, default=0.1,
+        help="Codebook entropy regularization weight (0 to disable). "
+        "Encourages uniform codebook usage to prevent collapse.",
+    )
+    parser.add_argument(
         "--gradient-checkpointing",
         action="store_true",
         help="Trade compute for memory in residual blocks",

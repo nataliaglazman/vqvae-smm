@@ -13,4 +13,6 @@ python /nfs/home/nglazman/vqvae-smm/train.py \
     --compile \
     --use-amp \
     --vqvae-scaling-rates 2 2 2 \
-    --skip-recon-ratio 0.3
+    --skip-recon-ratio 0.3 \
+    --entropy-weight 0.1 \
+    --vq-commitment-weight 0.25

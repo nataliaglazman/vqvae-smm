@@ -143,7 +143,7 @@ class CodeLayer(HelperModule):
     """
 
     def build(self, in_channels: int, embed_dim: int, nb_entries: int,
-              dead_threshold: float = 1.0):
+              dead_threshold: float = 1.0, entropy_weight: float = 0.0):
         self.conv_in = nn.Conv3d(in_channels, embed_dim, 1)
 
         self.dim = embed_dim
@@ -151,13 +151,14 @@ class CodeLayer(HelperModule):
         self.decay = 0.99
         self.eps = 1e-5
         self.dead_threshold = dead_threshold
+        self.entropy_weight = entropy_weight
 
         embed = torch.randn(embed_dim, nb_entries, dtype=torch.float32)
         self.register_buffer("embed", embed)
         self.register_buffer("cluster_size", torch.zeros(nb_entries, dtype=torch.float32))
         self.register_buffer("embed_avg", embed.clone())
 
-    @torch.amp.autocast("cuda", enabled=False)
+    @torch.cuda.amp.autocast(enabled=False)
     def forward(self, x: torch.FloatTensor) -> Tuple[torch.FloatTensor, torch.Tensor, torch.LongTensor]:
         # x: (B, C, D, H, W) -> (B, D, H, W, embed_dim)
         x = self.conv_in(x.float()).permute(0, 2, 3, 4, 1)
@@ -206,6 +207,22 @@ class CodeLayer(HelperModule):
                 self.cluster_size.data[dead_mask] = 1.0
 
         diff = (quantize.detach() - x).pow(2).mean()
+
+        # ── Entropy regularization ───────────────────────────────────
+        # Encourage uniform codebook usage by maximizing the entropy of
+        # the soft assignment distribution.  Uses a random subset for
+        # memory efficiency (full softmax over millions of vectors OOMs).
+        if self.training and self.entropy_weight > 0:
+            max_samples = 4096
+            if dist.shape[0] > max_samples:
+                sample_idx = torch.randint(0, dist.shape[0], (max_samples,), device=dist.device)
+                sampled_dist = dist[sample_idx]
+            else:
+                sampled_dist = dist
+            avg_probs = F.softmax(-sampled_dist, dim=1).mean(dim=0)
+            entropy = -(avg_probs * torch.log(avg_probs + 1e-10)).sum()
+            diff = diff - self.entropy_weight * entropy
+
         quantize = x + (quantize - x).detach()
 
         return quantize.permute(0, 4, 1, 2, 3), diff, embed_ind
@@ -270,6 +287,7 @@ class VQVAE(HelperModule):
         nb_entries: int = 384,
         scaling_rates: list[int] = [2, 2, 2],
         use_checkpoint: bool = True,
+        entropy_weight: float = 0.0,
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
@@ -301,8 +319,10 @@ class VQVAE(HelperModule):
 
         self.codebooks = nn.ModuleList()
         for i in range(nb_levels - 1):
-            self.codebooks.append(CodeLayer(hidden_channels + embed_dim, embed_dim, nb_entries))
-        self.codebooks.append(CodeLayer(hidden_channels, embed_dim, nb_entries))
+            self.codebooks.append(CodeLayer(hidden_channels + embed_dim, embed_dim, nb_entries,
+                                            entropy_weight=entropy_weight))
+        self.codebooks.append(CodeLayer(hidden_channels, embed_dim, nb_entries,
+                                        entropy_weight=entropy_weight))
 
         self.decoders = nn.ModuleList(
             [
