@@ -74,7 +74,7 @@ def build_transforms(spacing=2.0, crop_margin=0):
 
     # Deterministic preprocessing (cached after first pass)
     det = [
-        LoadImaged(keys=["image"]),
+        LoadImaged(keys=["image"], image_only=True),
         EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
     ]
     if spacing != 1.0:
@@ -85,7 +85,7 @@ def build_transforms(spacing=2.0, crop_margin=0):
         Orientationd(keys=["image"], axcodes="RAS"),
         ResizeWithPadOrCropd(keys=["image"], spatial_size=spatial_size),
         NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
-        ToTensord(keys=["image"]),
+        ToTensord(keys=["image"], track_meta=False),
     ])
     det_transform = Compose(det)
 

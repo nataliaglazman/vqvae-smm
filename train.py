@@ -222,11 +222,11 @@ def train(args):
     # Random augmentation is applied on-the-fly by CachedAugDataset wrapper.
     train_set = build_cached_dataset(
         train_dicts, det_transform, rand_transform=rand_transform,
-        cache_rate=1.0, num_workers=args.workers,
+        cache_rate=args.cache_rate, num_workers=args.workers,
     )
     val_set = build_cached_dataset(
         val_dicts, det_transform, rand_transform=None,
-        cache_rate=1.0, num_workers=args.workers,
+        cache_rate=args.val_cache_rate, num_workers=args.workers,
     )
     log.info(f"Dataset split -- train: {len(train_set)}, val: {len(val_set)}")
 
@@ -238,10 +238,10 @@ def train(args):
         return
 
     loader_kwargs = dict(
-        pin_memory=device.type == "cuda",
+        pin_memory=(device.type == "cuda" and not args.no_pin_memory),
         num_workers=args.workers,
-        persistent_workers=args.workers > 0,
-        prefetch_factor=2 if args.workers > 0 else None,
+        persistent_workers=(args.persistent_workers and args.workers > 0),
+        prefetch_factor=args.prefetch_factor if args.workers > 0 else None,
     )
     train_loader = DataLoader(
         train_set,
@@ -497,13 +497,13 @@ def run_evaluation(args):
 
     val_set = build_cached_dataset(
         val_dicts, det_transform, rand_transform=None,
-        cache_rate=1.0, num_workers=args.workers,
+        cache_rate=args.val_cache_rate, num_workers=args.workers,
     )
     loader_kwargs = dict(
-        pin_memory=device.type == "cuda",
+        pin_memory=(device.type == "cuda" and not args.no_pin_memory),
         num_workers=args.workers,
-        persistent_workers=args.workers > 0,
-        prefetch_factor=2 if args.workers > 0 else None,
+        persistent_workers=(args.persistent_workers and args.workers > 0),
+        prefetch_factor=args.prefetch_factor if args.workers > 0 else None,
     )
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, **loader_kwargs)
 

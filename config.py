@@ -42,6 +42,34 @@ def parse_args() -> argparse.ArgumentParser:
         help="DataLoader workers. For 3D MRI with pin_memory, each worker holds "
         "prefetch_factor batches in pinned memory (~330 MB each). Keep this low (4-8).",
     )
+    parser.add_argument(
+        "--cache-rate",
+        type=float,
+        default=0.25,
+        help="Fraction of training samples cached in RAM (0-1). Lower reduces CPU memory usage.",
+    )
+    parser.add_argument(
+        "--val-cache-rate",
+        type=float,
+        default=0.1,
+        help="Fraction of validation samples cached in RAM (0-1).",
+    )
+    parser.add_argument(
+        "--prefetch-factor",
+        type=int,
+        default=1,
+        help="Batches prefetched per DataLoader worker. Lower reduces CPU/pinned memory.",
+    )
+    parser.add_argument(
+        "--persistent-workers",
+        action="store_true",
+        help="Keep DataLoader worker processes alive between epochs (faster, higher RAM).",
+    )
+    parser.add_argument(
+        "--no-pin-memory",
+        action="store_true",
+        help="Disable pinned host memory in DataLoader to reduce CPU RAM usage.",
+    )
     parser.add_argument("--no-cuda", action="store_true")
     parser.add_argument(
         "--use-amp",
