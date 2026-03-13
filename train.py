@@ -144,7 +144,8 @@ def validate(model, loader, loss_fn, device, amp_enabled):
     for batch in loader:
         if first_batch is None:
             first_batch = batch  # keep for decoded-image saving (avoids re-spawning workers)
-        images = batch["image"].to(device)
+        images = batch["image"].to(device, non_blocking=True)
+        images = images.to(memory_format=torch.channels_last_3d)
         with torch.amp.autocast("cuda", enabled=amp_enabled):
             recon, diffs, *_ = model(images)
             loss = loss_fn({"reconstruction": [recon], "quantization_losses": diffs}, images)
