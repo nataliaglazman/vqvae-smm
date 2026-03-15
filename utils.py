@@ -231,8 +231,13 @@ def save_decoded_images(model, data, args, step: int, save_dir: Path) -> None:
         samples = data["image"]
         img = samples[0:1]  # (1, C, D, H, W) — first sample, keep batch dim
 
+        # If training used torch.compile(inductor), running occasional eval-mode
+        # forwards here can trigger a new compile that requires a system C
+        # compiler. Force eager execution for this utility path.
+        model_for_decode = torch._dynamo.disable(model) if hasattr(torch, "_dynamo") else model
+
         with torch.amp.autocast("cuda", enabled=amp_enabled):
-            decoded = model(img.to(device), return_recon=True)[0]
+            decoded = model_for_decode(img.to(device), return_recon=True)[0]
 
         decoded_np = decoded.float().squeeze().cpu().numpy()
         original_np = img.squeeze().cpu().numpy()
