@@ -15,6 +15,7 @@ from pathlib import Path
 from monai.transforms import (
     Compose,
     LoadImaged,
+    Lambdad,
     EnsureChannelFirstd,
     Spacingd,
     Orientationd,
@@ -35,6 +36,14 @@ def get_transforms(spacing=2.0, spatial_size=None):
         spatial_size = get_spatial_size(spacing)
     transforms = [
         LoadImaged(keys=["image"]),
+        # Some ADNI volumes are saved as 4D with a singleton non-spatial axis
+        # (e.g., D×H×W×1 or 1×D×H×W). Reduce to 3D so Orientationd("RAS")
+        # sees exactly 3 spatial dimensions.
+        Lambdad(
+            keys=["image"],
+            func=lambda x: x[0] if x.ndim == 4 and x.shape[0] == 1
+            else (x[..., 0] if x.ndim == 4 and x.shape[-1] == 1 else x),
+        ),
         EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
     ]
     if spacing != 1.0:

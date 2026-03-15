@@ -13,6 +13,7 @@ from monai.data import CacheDataset
 from monai.transforms import (
     Compose,
     EnsureChannelFirstd,
+    Lambdad,
     LoadImaged,
     NormalizeIntensityd,
     Orientationd,
@@ -75,6 +76,13 @@ def build_transforms(spacing=2.0, crop_margin=0):
     # Deterministic preprocessing (cached after first pass)
     det = [
         LoadImaged(keys=["image"], image_only=True),
+        # Some files can arrive as 4D with a singleton non-spatial axis.
+        # Collapse to 3D before Orientationd("RAS") to avoid axcodes mismatch.
+        Lambdad(
+            keys=["image"],
+            func=lambda x: x[0] if x.ndim == 4 and x.shape[0] == 1
+            else (x[..., 0] if x.ndim == 4 and x.shape[-1] == 1 else x),
+        ),
         EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
     ]
     if spacing != 1.0:
