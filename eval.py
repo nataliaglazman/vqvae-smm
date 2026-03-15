@@ -30,20 +30,23 @@ from loss import BaselineLoss
 from utils import get_spatial_size
 
 
+def _ensure_3d_image(x):
+    """Convert loaded image arrays to 3D before orientation transforms."""
+    x = np.asarray(x)
+    x = np.squeeze(x)
+    while x.ndim > 3:
+        x = x[..., 0]
+    return x
+
+
 def get_transforms(spacing=2.0, spatial_size=None):
     """Get MONAI transforms for 3D medical image preprocessing."""
     if spatial_size is None:
         spatial_size = get_spatial_size(spacing)
     transforms = [
-        LoadImaged(keys=["image"]),
-        # Some ADNI volumes are saved as 4D with a singleton non-spatial axis
-        # (e.g., D×H×W×1 or 1×D×H×W). Reduce to 3D so Orientationd("RAS")
-        # sees exactly 3 spatial dimensions.
-        Lambdad(
-            keys=["image"],
-            func=lambda x: x[0] if x.ndim == 4 and x.shape[0] == 1
-            else (x[..., 0] if x.ndim == 4 and x.shape[-1] == 1 else x),
-        ),
+        LoadImaged(keys=["image"], image_only=True),
+        # Ensure exactly 3 spatial dims before Orientationd("RAS").
+        Lambdad(keys=["image"], func=_ensure_3d_image),
         EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
     ]
     if spacing != 1.0:
@@ -54,7 +57,7 @@ def get_transforms(spacing=2.0, spatial_size=None):
         Orientationd(keys=["image"], axcodes="RAS"),
         ResizeWithPadOrCropd(keys=["image"], spatial_size=spatial_size),
         NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
-        ToTensord(keys=["image"]),
+        ToTensord(keys=["image"], track_meta=False),
     ])
     return Compose(transforms)
 

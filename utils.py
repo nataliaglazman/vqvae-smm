@@ -52,6 +52,20 @@ def get_spatial_size(spacing):
         return tuple(int(s / spacing) for s in (182, 218, 182))
 
 
+def _ensure_3d_image(x):
+    """Convert loaded image arrays to 3D before orientation transforms.
+
+    Handles common cases like (1, D, H, W), (D, H, W, 1), and arbitrary
+    higher-dimensional arrays by squeezing singleton axes and selecting the
+    first volume along trailing extra dimensions.
+    """
+    x = np.asarray(x)
+    x = np.squeeze(x)
+    while x.ndim > 3:
+        x = x[..., 0]
+    return x
+
+
 def build_transforms(spacing=2.0, crop_margin=0):
     """Build deterministic + random transform pipelines for CacheDataset.
 
@@ -76,13 +90,8 @@ def build_transforms(spacing=2.0, crop_margin=0):
     # Deterministic preprocessing (cached after first pass)
     det = [
         LoadImaged(keys=["image"], image_only=True),
-        # Some files can arrive as 4D with a singleton non-spatial axis.
-        # Collapse to 3D before Orientationd("RAS") to avoid axcodes mismatch.
-        Lambdad(
-            keys=["image"],
-            func=lambda x: x[0] if x.ndim == 4 and x.shape[0] == 1
-            else (x[..., 0] if x.ndim == 4 and x.shape[-1] == 1 else x),
-        ),
+        # Ensure exactly 3 spatial dims before Orientationd("RAS").
+        Lambdad(keys=["image"], func=_ensure_3d_image),
         EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
     ]
     if spacing != 1.0:
