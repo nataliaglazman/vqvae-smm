@@ -17,7 +17,7 @@ from loss import BaselineLoss
 from utils import (
     TBSummaryTypes, build_cached_dataset, build_transforms, load_items, save_decoded_images,
 )
-from vqvae2 import VQVAE
+from vqvae2 import VQVAE, CodeLayer
 
 
 logging.basicConfig(
@@ -348,11 +348,16 @@ def train(args):
 
             with torch.amp.autocast("cuda", enabled=amp_enabled):
                 recon, diffs, *_ = model(images, return_recon=not skip_recon)
+                vq_loss = sum(d.float() for d in diffs) * args.vq_commitment_weight
                 if skip_recon:
-                    loss = sum(diffs) * args.vq_commitment_weight
+                    loss = vq_loss
                 else:
-                    net_out = {"reconstruction": [recon], "quantization_losses": diffs}
-                    loss = loss_fn(net_out, images) * args.scale_recon_loss
+                    # Compute reconstruction losses (pixel + fft + perceptual + gdl)
+                    # separately from VQ loss so scale_recon_loss doesn't also
+                    # scale the commitment cost.
+                    net_out = {"reconstruction": [recon], "quantization_losses": []}
+                    recon_loss = loss_fn(net_out, images) * args.scale_recon_loss
+                    loss = recon_loss + vq_loss
 
             scaler.scale(loss / args.gradient_accumulation_steps).backward()
 
@@ -519,10 +524,27 @@ def run_evaluation(args):
     val_sample, val_loss = validate(model, val_loader, loss_fn, device, amp_enabled)
     log.info(f"Validation loss: {val_loss:.4f}")
 
-    # Log per-level codebook utilization
+    # Log per-level codebook utilization (EMA-based from training)
     for i, codebook in enumerate(model.codebooks):
         util = codebook.codebook_utilization()
-        log.info(f"  Codebook {i}: {util['active_codes']}/{codebook.n_embed} active "
+        log.info(f"  Codebook {i} (EMA): {util['active_codes']}/{codebook.n_embed} active "
+                 f"({util['utilization']:.1%}), perplexity={util['perplexity']:.1f}")
+
+    # Also compute actual inference-based utilization by collecting indices
+    log.info("Computing inference-based codebook utilization...")
+    all_ids = [[] for _ in range(model.nb_levels)]
+    with torch.no_grad():
+        for batch in val_loader:
+            images = batch["image"].to(device, non_blocking=True)
+            images = images.to(memory_format=torch.channels_last_3d)
+            with torch.amp.autocast("cuda", enabled=amp_enabled):
+                _, _, _, _, id_outputs = model(images, return_recon=True)
+            for lvl in range(model.nb_levels):
+                all_ids[lvl].append(id_outputs[lvl].cpu())
+    for i, codebook in enumerate(model.codebooks):
+        ids_cat = torch.cat(all_ids[i], dim=0)
+        util = CodeLayer.codebook_utilization_from_indices(ids_cat, codebook.n_embed)
+        log.info(f"  Codebook {i} (inference): {util['active_codes']}/{codebook.n_embed} active "
                  f"({util['utilization']:.1%}), perplexity={util['perplexity']:.1f}")
 
     # Save example reconstructions

@@ -18,7 +18,7 @@ class ReZero(HelperModule):
             nn.ReLU(inplace=True),
             nn.Conv3d(res_channels, in_channels, 3, stride=1, padding=1, bias=False),
             nn.BatchNorm3d(in_channels),
-            nn.ReLU(inplace=True),
+            # No final ReLU: allows residual to both add and subtract values
         )
         self.alpha = nn.Parameter(torch.tensor(0.0))
 
@@ -121,7 +121,9 @@ class Decoder(HelperModule):
 
 
         layers.append(nn.Conv3d(c_channel, out_channels, 3, stride=1, padding=1))
-        layers.append(nn.BatchNorm3d(out_channels))
+        # No BatchNorm on final decoder output: BN forces learned mean/variance
+        # on the reconstruction, creating train/eval discrepancy (especially
+        # problematic for single-channel outputs where BN has only 1 statistic).
         self.layers = nn.Sequential(*layers)
 
     def forward(
@@ -232,7 +234,12 @@ class CodeLayer(HelperModule):
 
     @torch.no_grad()
     def codebook_utilization(self) -> dict:
-        """Compute codebook health metrics (call after forward pass).
+        """Compute codebook health metrics from EMA training statistics.
+
+        NOTE: These reflect EMA-smoothed training statistics, NOT actual
+        inference usage.  Dead code resets inflate cluster_size, so this
+        can report 100% utilization even when many codes are rarely used.
+        For inference-time metrics, use ``codebook_utilization_from_indices``.
 
         Returns:
             dict with keys:
@@ -251,6 +258,33 @@ class CodeLayer(HelperModule):
             "active_codes": active.item(),
             "utilization": active.item() / self.n_embed,
             "perplexity": perplexity.item(),
+        }
+
+    @staticmethod
+    @torch.no_grad()
+    def codebook_utilization_from_indices(indices: torch.LongTensor, n_embed: int) -> dict:
+        """Compute codebook utilization from actual indices (inference-accurate).
+
+        Unlike ``codebook_utilization``, this counts which codes are actually
+        selected — not inflated by EMA or dead-code resets.
+
+        Args:
+            indices: LongTensor of codebook indices (any shape, e.g. from a
+                     full dataset pass).
+            n_embed: Total number of codebook entries.
+
+        Returns:
+            dict with active_codes, utilization, and perplexity.
+        """
+        counts = torch.bincount(indices.reshape(-1), minlength=n_embed).float()
+        active = (counts > 0).sum().item()
+        probs = counts / counts.sum().clamp(min=1e-10)
+        log_probs = torch.log(probs + 1e-10)
+        perplexity = torch.exp(-(probs * log_probs).sum()).item()
+        return {
+            "active_codes": int(active),
+            "utilization": active / n_embed,
+            "perplexity": perplexity,
         }
 
 class Upscaler(HelperModule):
@@ -495,8 +529,18 @@ class VQVAE(HelperModule):
 
         for l in range(self.nb_levels - 1, -1, -1):
             codebook, decoder = self.codebooks[l], self.decoders[l]
-            code_q = codebook.embed_code(cs[l]).permute(0, 3, 1, 2)
-            code_outputs = [self.upscalers[i](c, upscale_counts[i]) for i, c in enumerate(code_outputs)]
+            code_q = codebook.embed_code(cs[l]).permute(0, 4, 1, 2, 3)  # 3D: (B,D,H,W,C) → (B,C,D,H,W)
+
+            upscaled_codes = []
+            target_size = code_q.shape[2:]
+            for i, c in enumerate(code_outputs):
+                upscaled = self.upscalers[i](c, upscale_counts[i])
+                if upscaled.shape[2:] != target_size:
+                    upscaled = F.interpolate(
+                        upscaled, size=target_size, mode="trilinear", align_corners=False,
+                    )
+                upscaled_codes.append(upscaled)
+            code_outputs = upscaled_codes
             upscale_counts = [u + 1 for u in upscale_counts]
             decoder_outputs.append(decoder(torch.cat([code_q, *code_outputs], axis=1)))
 

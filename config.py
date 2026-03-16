@@ -3,8 +3,6 @@
 
 import argparse
 
-import numpy as np
-
 
 def parse_args() -> argparse.ArgumentParser:
     """
@@ -34,7 +32,7 @@ def parse_args() -> argparse.ArgumentParser:
         help="Validation fraction (0-1) or absolute count (>=1)",
     )
     parser.add_argument("--test-size", default=25000, type=int)
-    parser.add_argument("--seed", type=int, default=np.random.randint(32**2 - 1))
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--workers",
         type=int,

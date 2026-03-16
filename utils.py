@@ -110,9 +110,10 @@ def build_transforms(spacing=2.0, crop_margin=0):
     rand_transform = Compose([
         RandAffined(
             keys=["image"],
-            rotate_range=[-0.05, 0.05],
-            shear_range=[0.001, 0.05],
-            scale_range=[0, 0.05],
+            rotate_range=[0.05, 0.05, 0.05],          # 3 axes for 3D
+            shear_range=[0.05, 0.05, 0.05,             # 6 values for 3D:
+                         0.05, 0.05, 0.05],             # one per axis-pair
+            scale_range=[0.05, 0.05, 0.05],            # 3 axes for 3D
             mode="bilinear",
             padding_mode="zeros",
             prob=0.5,

@@ -154,9 +154,17 @@ class BaselineLoss(torch.nn.Module):
         # size first — the frequency loss is still meaningful at lower
         # resolution and the memory saving is dramatic.
         with torch.amp.autocast("cuda", enabled=False):
-            # fftn requires float32; gt/recon may be float16 under AMP
-            gt_f = (gt.float() + 1.0) / 2.0
-            recon_f = (recon.float() + 1.0) / 2.0
+            # fftn requires float32; gt/recon may be float16 under AMP.
+            # Data is zero-mean/unit-std from NormalizeIntensityd, so we
+            # normalise to [0, 1] using the actual batch range (not a
+            # hard-coded [-1, 1] assumption).
+            gt_f = gt.float()
+            recon_f = recon.float()
+            batch_min = gt_f.amin(dim=(1, 2, 3, 4), keepdim=True)
+            batch_max = gt_f.amax(dim=(1, 2, 3, 4), keepdim=True)
+            denom = (batch_max - batch_min).clamp(min=1e-8)
+            gt_f = (gt_f - batch_min) / denom
+            recon_f = (recon_f - batch_min) / denom  # same scale as gt
 
             n_voxels = gt_f[0, 0].numel()
             if n_voxels > max_voxels:
@@ -218,8 +226,11 @@ class BaselineLoss(torch.nn.Module):
             counts.append(s_gt.shape[0])
 
         # ── Single LPIPS forward pass ────────────────────────────────
-        cat_gt = torch.cat(all_gt, dim=0).float()
-        cat_recon = torch.cat(all_recon, dim=0).float()
+        # LPIPS expects inputs in [-1, 1].  Data is zero-mean/unit-std from
+        # NormalizeIntensityd so we clamp to [-1, 1] to match the pretrained
+        # backbone's expected range.
+        cat_gt = torch.cat(all_gt, dim=0).float().clamp(-1, 1)
+        cat_recon = torch.cat(all_recon, dim=0).float().clamp(-1, 1)
         per_slice = self.perceptual_function.forward(cat_gt, cat_recon).view(-1)
 
         # Split back for per-orientation logging
