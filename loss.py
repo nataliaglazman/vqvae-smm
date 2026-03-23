@@ -266,3 +266,184 @@ class BaselineLoss(torch.nn.Module):
 
     def get_summaries(self) -> Dict[str, torch.Tensor]:
         return self.summaries
+
+class CliffLoss(torch.nn.Module):
+    def __init__(self, commitment_weight: float = 0.25):
+        super(CliffLoss, self).__init__()
+        
+    def univariate_cliff_loss(self, z, sigma=0.1, K=100, z_min=-5.0, z_max=5.0):
+        """
+        Computes l_uni = sum_i H(s_i), the entropy of the normalized
+        gradient magnitude of each marginal density.
+        
+        Args:
+            z: (n, d) tensor of latent factors (already standardized to mean=0, std=1)
+            sigma: KDE bandwidth
+            K: number of grid points for numerical integration
+            z_min, z_max: integration bounds
+        """
+        n, d = z.shape
+        
+        # Grid points for numerical integration: (K,)
+        dz = (z_max - z_min) / K
+        grid = torch.linspace(z_min + dz/2, z_max - dz/2, K, device=z.device)
+        
+        total_entropy = 0.0
+        
+        for i in range(d):
+            zi = z[:, i]  # (n,)
+            
+            # KDE marginal density at grid points: p(zi)
+            # diff: (K, n) — grid points minus each sample
+            diff = grid.unsqueeze(1) - zi.unsqueeze(0)  # (K, n)
+            
+            # Gaussian kernel values: (K, n)
+            kernel = torch.exp(-0.5 * (diff / sigma) ** 2) / (sigma * (2 * torch.pi) ** 0.5)
+            
+            # Derivative of each kernel w.r.t. zi: d/dz N(z; mu, sigma^2) = -(z-mu)/sigma^2 * N(...)
+            dkernel = (-diff / sigma**2) * kernel  # (K, n)
+            
+            # dp/dz_i at each grid point: (K,)
+            dp_dzi = dkernel.mean(dim=1)
+            
+            # Absolute gradient magnitude: |dp/dz_i|
+            abs_grad = dp_dzi.abs()  # (K,)
+            
+            # Normalization constant c = integral of |dp/dz_i| over z_i
+            c = abs_grad.sum() * dz
+            
+            # Normalized density s_i(z_i) = |dp/dz_i| / c
+            si = abs_grad / (c + 1e-12)
+            
+            # Differential entropy H(s_i) = -integral s_i * log(s_i) dz_i
+            log_si = torch.log(si + 1e-12)
+            H_si = -(si * log_si).sum() * dz
+            
+            total_entropy += H_si
+        
+        return total_entropy  # minimize this
+    
+    def bivariate_cliff_loss(self, z, sigma=0.1, K=100, M=10, z_min=-5.0, z_max=5.0):
+        """
+        Computes l_biv = sum_{i} sum_{j!=i} JSD[p̃_ij(·|z_j=ξ_1), ..., p̃_ij(·|z_j=ξ_M)]
+        
+        Args:
+            z: (n, d) standardized latent factors
+            sigma: KDE bandwidth
+            K: grid points for numerical integration
+            M: number of conditioning values ξ_k sampled from the batch
+        """
+        n, d = z.shape
+        dz = (z_max - z_min) / K
+        grid = z_min + dz * (torch.arange(K, device=z.device) + 0.5)
+
+        total_jsd = 0.0
+
+        for i in range(d):
+            for j in range(d):
+                if i == j:
+                    continue
+
+                zi = z[:, i]  # (n,)
+                zj = z[:, j]  # (n,)
+
+                # Sample M conditioning values ξ_k from the batch
+                indices = torch.randperm(n, device=z.device)[:M]
+                xi_vals = zj[indices]  # (M,)
+
+                # --- z_i dimension: kernel and its derivative on the grid ---
+                diff_i = grid.unsqueeze(1) - zi.unsqueeze(0)       # (K, n)
+                kernel_i = torch.exp(-0.5 * (diff_i / sigma) ** 2) \
+                            / (sigma * (2 * torch.pi) ** 0.5)       # (K, n)
+                dkernel_i = (-diff_i / sigma ** 2) * kernel_i       # (K, n)
+
+                # --- z_j dimension: kernel at each ξ_k for every sample ---
+                diff_j = xi_vals.unsqueeze(1) - zj.unsqueeze(0)    # (M, n)
+                kernel_j = torch.exp(-0.5 * (diff_j / sigma) ** 2) \
+                            / (sigma * (2 * torch.pi) ** 0.5)       # (M, n)
+
+                # Marginal p(z_j = ξ_k) via 1D KDE (Eq. 2)
+                p_zj = kernel_j.mean(dim=1)                         # (M,)
+
+                # Joint partial derivative ∂p(z_i, z_j)/∂z_i at (grid, ξ_k) (Eq. 5)
+                # For each (m, k): (1/n) Σ_l dkernel_i[k, l] * kernel_j[m, l]
+                dp_joint_dzi = kernel_j @ dkernel_i.T / n           # (M, K)
+
+                # Conditional derivative (Eq. 11):
+                # ∂p(z_i|z_j)/∂z_i = (1/p(z_j)) * ∂p(z_i,z_j)/∂z_i
+                dp_cond_dzi = dp_joint_dzi / (p_zj.unsqueeze(1) + 1e-12)  # (M, K)
+
+                # u_ij = |∂p(z_i|z_j)/∂z_i| (Eq. 12)
+                u_ij = dp_cond_dzi.abs()                            # (M, K)
+
+                # Normalize to density p̃_ij (Eq. 13)
+                norms = u_ij.sum(dim=1, keepdim=True) * dz          # (M, 1)
+                p_tilde = u_ij / (norms + 1e-12)                    # (M, K)
+
+                # --- Generalized JSD (Eq. 14) ---
+                # m̃(z_i) = (1/M) Σ_k p̃_ij(z_i | z_j = ξ_k)
+                m_tilde = p_tilde.mean(dim=0)                       # (K,)
+
+                # H(m̃)
+                H_m = -(m_tilde * torch.log(m_tilde + 1e-12)).sum() * dz
+
+                # (1/M) Σ_k H(p̃_ij(·|z_j = ξ_k))
+                H_each = -(p_tilde * torch.log(p_tilde + 1e-12)).sum(dim=1) * dz  # (M,)
+                H_mean = H_each.mean()
+
+                # JSD = H(m̃) - (1/M) Σ H(p̃_k)
+                total_jsd += (H_m - H_mean)
+
+        return total_jsd
+    
+    def anticollapse_loss(self, z, sigma=0.1, K=100, z_min=-5.0, z_max=5.0):
+        """
+        Computes l_KL-uni = sum_i KL(U(-sqrt(3), sqrt(3)) || p(z_i))
+        
+        Encourages each standardized marginal p(z_i) to be close to a
+        uniform distribution, preventing collapse to Diracs.
+        
+        Args:
+            z: (n, d) standardized latent factors
+            sigma: KDE bandwidth
+            K: number of sample points for estimating the expectation
+        """
+        n, d = z.shape
+        sqrt3 = 3.0 ** 0.5
+
+        total_kl = 0.0
+
+        for i in range(d):
+            zi = z[:, i]  # (n,)
+
+            # Sample K points from U(-sqrt(3), sqrt(3))
+            u_samples = torch.rand(K, device=z.device) * 2 * sqrt3 - sqrt3  # (K,)
+
+            # Evaluate KDE marginal p(z_i) at those uniform samples (Eq. 2)
+            diff = u_samples.unsqueeze(1) - zi.unsqueeze(0)  # (K, n)
+            kernel = torch.exp(-0.5 * (diff / sigma) ** 2) \
+                    / (sigma * (2 * torch.pi) ** 0.5)        # (K, n)
+            p_zi = kernel.mean(dim=1)                          # (K,)
+
+
+            log_p = torch.log(p_zi + 1e-12)  # (K,)
+            E_log_p = log_p.mean()  # Monte Carlo estimate of E_U[log p(z_i)]
+
+            kl = -torch.log(torch.tensor(2 * sqrt3, device=z.device)) - E_log_p
+            total_kl += kl
+
+        return total_kl  # minimize this
+    
+    def forward(self, network_output: Dict[str, List[torch.Tensor]], target: torch.Tensor) -> torch.Tensor:
+        # gt = ground truth, recon = reconstruction
+        gt = target.float()
+        recon = network_output["reconstruction"][0].float()
+        q_losses = network_output["quantization_losses"]
+
+        loss = self.unientropy(recon) + self.bientropy(recon) + self.dirac_delta(recon - gt)
+
+        for idx, q_loss in enumerate(q_losses):
+            q_loss = q_loss.float()
+            loss = loss + q_loss
+
+        return loss
