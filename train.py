@@ -197,7 +197,10 @@ def train(args):
         return
 
     det_transform, rand_transform = build_transforms(
-        spacing=args.image_spacing, crop_margin=args.crop_margin,
+        spacing=args.image_spacing,
+        crop_margin=args.crop_margin,
+        downsample=args.downsample,
+        sample_path=items[0]["image"],
     )
 
     # Train / val split (stratified by class label)
@@ -485,7 +488,10 @@ def run_evaluation(args):
         return
 
     det_transform, _ = build_transforms(
-        spacing=args.image_spacing, crop_margin=args.crop_margin,
+        spacing=args.image_spacing,
+        crop_margin=args.crop_margin,
+        downsample=args.downsample,
+        sample_path=items[0]["image"],
     )
 
     if args.val_size < 1:

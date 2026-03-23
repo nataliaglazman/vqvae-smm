@@ -11,6 +11,7 @@ import torch
 
 from monai.data import CacheDataset
 from monai.transforms import (
+    CenterSpatialCropd,
     Compose,
     EnsureChannelFirstd,
     Lambdad,
@@ -19,6 +20,7 @@ from monai.transforms import (
     Orientationd,
     RandAffined,
     RandShiftIntensityd,
+    Resized,
     ResizeWithPadOrCropd,
     Spacingd,
     ToTensord,
@@ -43,6 +45,10 @@ def get_spatial_size(spacing):
     """Compute target spatial size for a given isotropic voxel spacing.
 
     Reference: 1mm images are approximately 182x218x182 voxels.
+
+    .. deprecated::
+        Prefer :func:`probe_spatial_size` which reads the actual image
+        dimensions instead of relying on hardcoded lookup tables.
     """
     if spacing == 1.0:
         return (182, 218, 182)
@@ -50,6 +56,33 @@ def get_spatial_size(spacing):
         return (91, 109, 91)
     else:
         return tuple(int(s / spacing) for s in (182, 218, 182))
+
+
+def probe_spatial_size(sample_path, spacing=1.0):
+    """Load a single image and return its spatial size after resampling.
+
+    This avoids hardcoded dimension tables — the size is read directly
+    from the data at whatever voxel spacing is requested.
+
+    Args:
+        sample_path: Path to one NIfTI (or other MONAI-readable) image.
+        spacing: Isotropic voxel spacing in mm.
+
+    Returns:
+        Tuple (D, H, W) after resampling + RAS orientation.
+    """
+    probe = [
+        LoadImaged(keys=["image"], image_only=True),
+        Lambdad(keys=["image"], func=_ensure_3d_image),
+        EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
+    ]
+    if spacing != 1.0:
+        probe.append(
+            Spacingd(keys=["image"], pixdim=(spacing, spacing, spacing), mode="bilinear")
+        )
+    probe.append(Orientationd(keys=["image"], axcodes="RAS"))
+    result = Compose(probe)({"image": sample_path})
+    return tuple(result["image"].shape[1:])  # (D, H, W) after channel dim
 
 
 def _ensure_3d_image(x):
@@ -66,7 +99,8 @@ def _ensure_3d_image(x):
     return x
 
 
-def build_transforms(spacing=2.0, crop_margin=0):
+def build_transforms(spacing=2.0, crop_margin=0, downsample=1.0,
+                     sample_path=None):
     """Build deterministic + random transform pipelines for CacheDataset.
 
     The deterministic transforms (load, resample, orient, normalize) are
@@ -75,19 +109,45 @@ def build_transforms(spacing=2.0, crop_margin=0):
 
     Args:
         spacing: Isotropic voxel spacing in mm.
-        crop_margin: Voxels to crop from each edge.
+        crop_margin: Voxels to crop from each edge (0 = no crop).
+        downsample: Extra spatial downsampling factor applied after
+            resampling/cropping (e.g. 0.5 = halve each dim, 1.0 = no change).
+        sample_path: Path to one image used to probe native spatial size.
+            If provided, dimensions are read from the data instead of using
+            the hardcoded lookup table in :func:`get_spatial_size`.
 
     Returns:
         (det_transform, rand_transform) — pass det_transform to
         ``build_cached_dataset`` and rand_transform for training only.
     """
-    spatial_size = get_spatial_size(spacing)
+    # ── Determine native spatial size ────────────────────────────────────
+    if sample_path is not None:
+        native_size = probe_spatial_size(sample_path, spacing=spacing)
+        log.info(f"Probed spatial size from data: {native_size} "
+                 f"(spacing={spacing}mm)")
+    else:
+        native_size = get_spatial_size(spacing)
+        log.info(f"Using hardcoded spatial size: {native_size} "
+                 f"(spacing={spacing}mm)")
+
+    # ── Apply crop margin ────────────────────────────────────────────────
     if crop_margin > 0:
-        spatial_size = tuple(s - 2 * crop_margin for s in spatial_size)
+        spatial_size = tuple(s - 2 * crop_margin for s in native_size)
+        assert all(s > 0 for s in spatial_size), (
+            f"crop_margin={crop_margin} is too large for native size {native_size}"
+        )
+        log.info(f"After cropping {crop_margin}px per edge: {spatial_size}")
+    else:
+        spatial_size = native_size
 
-    log.info(f"Voxel spacing: {spacing}mm, spatial size: {spatial_size}")
+    # ── Apply downsampling ───────────────────────────────────────────────
+    if downsample < 1.0:
+        spatial_size = tuple(max(1, int(s * downsample)) for s in spatial_size)
+        log.info(f"After downsampling (factor {downsample}): {spatial_size}")
 
-    # Deterministic preprocessing (cached after first pass)
+    log.info(f"Final spatial size: {spatial_size}")
+
+    # ── Deterministic preprocessing (cached after first pass) ────────────
     det = [
         LoadImaged(keys=["image"], image_only=True),
         # Ensure exactly 3 spatial dims before Orientationd("RAS").
@@ -98,9 +158,24 @@ def build_transforms(spacing=2.0, crop_margin=0):
         det.append(
             Spacingd(keys=["image"], pixdim=(spacing, spacing, spacing), mode="bilinear")
         )
+    det.append(Orientationd(keys=["image"], axcodes="RAS"))
+
+    # Crop first (at native resolution), then downsample if requested
+    if crop_margin > 0:
+        cropped_size = tuple(s - 2 * crop_margin for s in native_size)
+        det.append(CenterSpatialCropd(keys=["image"], roi_size=cropped_size))
+
+    if downsample < 1.0:
+        det.append(
+            Resized(keys=["image"], spatial_size=spatial_size, mode="trilinear")
+        )
+    else:
+        # Pad/crop to uniform size (handles minor per-subject size variation)
+        det.append(
+            ResizeWithPadOrCropd(keys=["image"], spatial_size=spatial_size)
+        )
+
     det.extend([
-        Orientationd(keys=["image"], axcodes="RAS"),
-        ResizeWithPadOrCropd(keys=["image"], spatial_size=spatial_size),
         NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
         ToTensord(keys=["image"], track_meta=False),
     ])

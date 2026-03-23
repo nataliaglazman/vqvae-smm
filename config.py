@@ -134,6 +134,11 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--image-spacing", type=float, default=1.0, help="Isotropic voxel spacing in mm")
     parser.add_argument("--crop-margin", type=int, default=0, help="Voxels to crop from each edge")
     parser.add_argument(
+        "--downsample", type=float, default=1.0,
+        help="Extra spatial downsampling factor after resampling/cropping "
+             "(e.g. 0.5 = halve each dim, 1.0 = no change)",
+    )
+    parser.add_argument(
         "--csv-path", type=str,
         default="/nfs/home/nglazman/cluster/labels_cleaned_3class.csv",
         help="Path to CSV file with Subject and Group columns",

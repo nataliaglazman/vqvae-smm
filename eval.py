@@ -13,10 +13,12 @@ import argparse
 from pathlib import Path
 
 from monai.transforms import (
+    CenterSpatialCropd,
     Compose,
     LoadImaged,
     Lambdad,
     EnsureChannelFirstd,
+    Resized,
     Spacingd,
     Orientationd,
     NormalizeIntensityd,
@@ -27,7 +29,7 @@ from monai.data import Dataset, DataLoader as MonaiDataLoader
 
 from vqvae2 import VQVAE
 from loss import BaselineLoss
-from utils import get_spatial_size
+from utils import get_spatial_size, probe_spatial_size
 
 
 def _ensure_3d_image(x):
@@ -39,13 +41,40 @@ def _ensure_3d_image(x):
     return x
 
 
-def get_transforms(spacing=2.0, spatial_size=None):
-    """Get MONAI transforms for 3D medical image preprocessing."""
-    if spatial_size is None:
-        spatial_size = get_spatial_size(spacing)
+def get_transforms(spacing=2.0, spatial_size=None, crop_margin=0,
+                    downsample=1.0, sample_path=None):
+    """Get MONAI transforms for 3D medical image preprocessing.
+
+    Args:
+        spacing: Isotropic voxel spacing in mm.
+        spatial_size: Explicit (D, H, W) override. If *None*, the size is
+            probed from ``sample_path`` (preferred) or looked up via
+            :func:`get_spatial_size`.
+        crop_margin: Voxels to crop from each edge (0 = no crop).
+        downsample: Extra spatial downsampling factor (e.g. 0.5 = halve).
+        sample_path: Path to one image for probing native spatial size.
+    """
+    # ── Determine native spatial size ────────────────────────────────────
+    if spatial_size is not None:
+        native_size = spatial_size
+    elif sample_path is not None:
+        native_size = probe_spatial_size(sample_path, spacing=spacing)
+    else:
+        native_size = get_spatial_size(spacing)
+
+    # ── Apply crop margin ────────────────────────────────────────────────
+    if crop_margin > 0:
+        target_size = tuple(s - 2 * crop_margin for s in native_size)
+    else:
+        target_size = native_size
+
+    # ── Apply downsampling ───────────────────────────────────────────────
+    if downsample < 1.0:
+        target_size = tuple(max(1, int(s * downsample)) for s in target_size)
+
+    # ── Build pipeline ───────────────────────────────────────────────────
     transforms = [
         LoadImaged(keys=["image"], image_only=True),
-        # Ensure exactly 3 spatial dims before Orientationd("RAS").
         Lambdad(keys=["image"], func=_ensure_3d_image),
         EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
     ]
@@ -53,9 +82,24 @@ def get_transforms(spacing=2.0, spatial_size=None):
         transforms.append(
             Spacingd(keys=["image"], pixdim=(spacing, spacing, spacing), mode="bilinear")
         )
+    transforms.append(Orientationd(keys=["image"], axcodes="RAS"))
+
+    if crop_margin > 0:
+        cropped_size = tuple(s - 2 * crop_margin for s in native_size)
+        transforms.append(
+            CenterSpatialCropd(keys=["image"], roi_size=cropped_size)
+        )
+
+    if downsample < 1.0:
+        transforms.append(
+            Resized(keys=["image"], spatial_size=target_size, mode="trilinear")
+        )
+    else:
+        transforms.append(
+            ResizeWithPadOrCropd(keys=["image"], spatial_size=target_size)
+        )
+
     transforms.extend([
-        Orientationd(keys=["image"], axcodes="RAS"),
-        ResizeWithPadOrCropd(keys=["image"], spatial_size=spatial_size),
         NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
         ToTensord(keys=["image"], track_meta=False),
     ])
