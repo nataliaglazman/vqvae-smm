@@ -394,8 +394,9 @@ class CliffLoss(torch.nn.Module):
         # p(z_j = ξ_k) marginal via 1D KDE: (d, M)
         p_zj_all = kernel_j_all.mean(dim=2)  # (d, M)
 
-        # Mask to exclude i==j diagonal (no in-place modification)
-        diag_mask = torch.ones(d, device=z.device)
+        # Precompute per-j masks to zero out the i==j diagonal entry.
+        # Each mask is a fresh tensor — no in-place mutation.
+        eye = torch.eye(d, device=z.device)  # (d, d)
 
         # --- Compute JSD for all (i, j) pairs, chunking over j ---
         total_jsd = torch.tensor(0.0, device=z.device)
@@ -432,10 +433,9 @@ class CliffLoss(torch.nn.Module):
 
             jsd_j = H_m - H_mean  # (d,)
 
-            # Zero out the i==j diagonal entry via multiplication (no in-place op)
-            diag_mask.fill_(1.0)
-            diag_mask[j] = 0.0
-            total_jsd = total_jsd + (jsd_j * diag_mask.detach()).sum()
+            # Zero out the i==j diagonal entry: multiply by (1 - one_hot[j])
+            # No in-place ops — eye is constant, subtraction creates a new tensor.
+            total_jsd = total_jsd + (jsd_j * (1.0 - eye[j])).sum()
 
         return total_jsd
 
