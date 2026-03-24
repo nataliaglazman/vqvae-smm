@@ -485,7 +485,7 @@ def train(args):
                     cliff_total = cliff_fn.get_summaries().get(TBSummaryTypes.SCALAR, {}).get("Loss-Cliff-Total")
                     if cliff_total is not None:
                         v = cliff_total.item() if torch.is_tensor(cliff_total) else cliff_total
-                        parts.append(f"cliff {v:.4f}")
+                        parts.append(f"cliff {v * args.scale_cliff_loss:.4f}")
                 parts.extend([f"lr {lr:.2e}", f"ep {epoch}", f"{elapsed:.0f}s"])
                 log.info(" | ".join(parts))
 
