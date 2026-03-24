@@ -281,7 +281,7 @@ class CliffLoss(torch.nn.Module):
         lambda_uni: float = 1.0,
         lambda_biv: float = 1.0,
         lambda_kl_uni: float = 1.0,
-        sigma: float = 0.1,
+        sigma: float | None = None,
         K: int = 100,
         M: int = 10,
         latent_dim: int = 32,
@@ -293,7 +293,7 @@ class CliffLoss(torch.nn.Module):
         self.lambda_uni = lambda_uni
         self.lambda_biv = lambda_biv
         self.lambda_kl_uni = lambda_kl_uni
-        self.sigma = sigma
+        self._sigma_override = sigma  # None → auto via Silverman's rule
         self.K = K
         self.M = M
         self.latent_dim = latent_dim
@@ -316,6 +316,14 @@ class CliffLoss(torch.nn.Module):
             # Xavier init for stable gradients at start
             torch.nn.init.xavier_uniform_(self.proj.weight)
 
+    def _bandwidth(self, n: int) -> float:
+        """Return KDE bandwidth.  If user set sigma explicitly, use that.
+        Otherwise apply Silverman's rule: σ = n^(−1/5) (data is already
+        standardised to unit variance)."""
+        if self._sigma_override is not None:
+            return self._sigma_override
+        return max(n ** (-0.2), 0.1)  # floor at 0.1 for very large batches
+
     @staticmethod
     def _standardize(z: torch.Tensor) -> torch.Tensor:
         """Standardize each factor to zero mean and unit variance (per-batch)."""
@@ -323,12 +331,13 @@ class CliffLoss(torch.nn.Module):
         std = z.std(dim=0, keepdim=True).clamp(min=1e-8)
         return (z - mu) / std
 
-    def _kde_kernels(self, z: torch.Tensor, grid: torch.Tensor):
+    def _kde_kernels(self, z: torch.Tensor, grid: torch.Tensor, sigma: float):
         """Precompute Gaussian KDE kernels and their derivatives for all dims.
 
         Args:
             z: (n, d) standardised latent factors
             grid: (K,) evaluation points
+            sigma: KDE bandwidth
 
         Returns:
             kernel:  (d, K, n) — Gaussian kernel values
@@ -337,10 +346,10 @@ class CliffLoss(torch.nn.Module):
         # z.T → (d, n);  grid → (K,)
         # diff: (d, K, n) = grid[k] − z[l, i]
         diff = grid.view(1, -1, 1) - z.T.unsqueeze(1)
-        kernel = torch.exp(-0.5 * (diff / self.sigma) ** 2) / (
-            self.sigma * (2 * torch.pi) ** 0.5
+        kernel = torch.exp(-0.5 * (diff / sigma) ** 2) / (
+            sigma * (2 * torch.pi) ** 0.5
         )
-        dkernel = (-diff / self.sigma ** 2) * kernel
+        dkernel = (-diff / sigma ** 2) * kernel
         return kernel, dkernel
 
     # ── sub-losses (fully vectorized) ─────────────────────────────────────
@@ -357,7 +366,8 @@ class CliffLoss(torch.nn.Module):
         return H.sum()
 
     def bivariate_cliff_loss(self, z: torch.Tensor, grid: torch.Tensor, dz: float,
-                             kernel: torch.Tensor, dkernel: torch.Tensor) -> torch.Tensor:
+                             kernel: torch.Tensor, dkernel: torch.Tensor,
+                             sigma: float) -> torch.Tensor:
         """l_biv = Σ_{i≠j} JSD of conditional gradient-magnitude densities.
 
         Vectorised over all (i, j) pairs by chunking over the conditioning
@@ -377,12 +387,15 @@ class CliffLoss(torch.nn.Module):
 
         # diff_j for all j: z_xi[:, j] − z[:, j]  →  (d, M, n)
         diff_j_all = z_xi.T.unsqueeze(2) - z.T.unsqueeze(1)  # (d, M, n)
-        kernel_j_all = torch.exp(-0.5 * (diff_j_all / self.sigma) ** 2) / (
-            self.sigma * (2 * torch.pi) ** 0.5
+        kernel_j_all = torch.exp(-0.5 * (diff_j_all / sigma) ** 2) / (
+            sigma * (2 * torch.pi) ** 0.5
         )  # (d, M, n)
 
         # p(z_j = ξ_k) marginal via 1D KDE: (d, M)
         p_zj_all = kernel_j_all.mean(dim=2)  # (d, M)
+
+        # Mask to exclude i==j diagonal (no in-place modification)
+        diag_mask = torch.ones(d, device=z.device)
 
         # --- Compute JSD for all (i, j) pairs, chunking over j ---
         total_jsd = torch.tensor(0.0, device=z.device)
@@ -419,14 +432,14 @@ class CliffLoss(torch.nn.Module):
 
             jsd_j = H_m - H_mean  # (d,)
 
-            # Zero out the i==j diagonal entry
-            jsd_j[j] = 0.0
-
-            total_jsd = total_jsd + jsd_j.sum()
+            # Zero out the i==j diagonal entry via multiplication (no in-place op)
+            diag_mask.fill_(1.0)
+            diag_mask[j] = 0.0
+            total_jsd = total_jsd + (jsd_j * diag_mask.detach()).sum()
 
         return total_jsd
 
-    def anticollapse_loss(self, z: torch.Tensor) -> torch.Tensor:
+    def anticollapse_loss(self, z: torch.Tensor, sigma: float) -> torch.Tensor:
         """l_KL-uni = Σ_i KL(U(−√3, √3) ∥ p(z_i)) — prevents collapse to Diracs."""
         n, d = z.shape
         sqrt3 = 3.0 ** 0.5
@@ -438,8 +451,8 @@ class CliffLoss(torch.nn.Module):
         # KDE at uniform samples for ALL dims at once
         # diff: (d, K, n) = u_samples[k] − z[l, i]
         diff = u_samples.view(1, K, 1) - z.T.unsqueeze(1)  # (d, K, n)
-        kernel = torch.exp(-0.5 * (diff / self.sigma) ** 2) / (
-            self.sigma * (2 * torch.pi) ** 0.5
+        kernel = torch.exp(-0.5 * (diff / sigma) ** 2) / (
+            sigma * (2 * torch.pi) ** 0.5
         )  # (d, K, n)
         p_z = kernel.mean(dim=2)  # (d, K)
 
@@ -460,30 +473,39 @@ class CliffLoss(torch.nn.Module):
             z: (n, d_raw) tensor of pooled encoder features (will be projected
                to ``latent_dim`` before computing losses).
         """
-        # Learnable projection: (n, d_raw) → (n, latent_dim)
-        self._ensure_proj(z.shape[1], z.device)
-        z = self.proj(z)
+        # Force float32 — KDE involves exp/log that are numerically fragile
+        # in float16 under AMP (exp underflows → 0, log(0) → -inf → NaN).
+        with torch.amp.autocast("cuda", enabled=False):
+            z = z.float()
 
-        z_std = self._standardize(z)
+            # Learnable projection: (n, d_raw) → (n, latent_dim)
+            self._ensure_proj(z.shape[1], z.device)
+            z = self.proj(z)
 
-        # Shared grid for univariate / bivariate integration
-        dz = (self.z_max - self.z_min) / self.K
-        grid = torch.linspace(
-            self.z_min + dz / 2, self.z_max - dz / 2, self.K, device=z.device
-        )
+            z_std = self._standardize(z)
+            n = z_std.shape[0]
 
-        # Precompute KDE kernels once (reused by uni + biv)
-        kernel, dkernel = self._kde_kernels(z_std, grid)
+            # Adaptive bandwidth via Silverman's rule (or user override)
+            sigma = self._bandwidth(n)
 
-        l_uni = self.univariate_cliff_loss(z_std, grid, dz, dkernel)
-        l_biv = self.bivariate_cliff_loss(z_std, grid, dz, kernel, dkernel)
-        l_kl = self.anticollapse_loss(z_std)
+            # Shared grid for univariate / bivariate integration
+            dz = (self.z_max - self.z_min) / self.K
+            grid = torch.linspace(
+                self.z_min + dz / 2, self.z_max - dz / 2, self.K, device=z.device
+            )
 
-        loss = (
-            self.lambda_uni * l_uni
-            + self.lambda_biv * l_biv
-            + self.lambda_kl_uni * l_kl
-        )
+            # Precompute KDE kernels once (reused by uni + biv)
+            kernel, dkernel = self._kde_kernels(z_std, grid, sigma)
+
+            l_uni = self.univariate_cliff_loss(z_std, grid, dz, dkernel)
+            l_biv = self.bivariate_cliff_loss(z_std, grid, dz, kernel, dkernel, sigma)
+            l_kl = self.anticollapse_loss(z_std, sigma)
+
+            loss = (
+                self.lambda_uni * l_uni
+                + self.lambda_biv * l_biv
+                + self.lambda_kl_uni * l_kl
+            )
 
         self.summaries[TBSummaryTypes.SCALAR]["Loss-Cliff-Univariate"] = l_uni
         self.summaries[TBSummaryTypes.SCALAR]["Loss-Cliff-Bivariate"] = l_biv

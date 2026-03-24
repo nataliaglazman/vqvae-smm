@@ -157,7 +157,10 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--cliff-lambda-uni", type=float, default=1.0, help="Weight for univariate cliff term")
     parser.add_argument("--cliff-lambda-biv", type=float, default=1.0, help="Weight for bivariate cliff term")
     parser.add_argument("--cliff-lambda-kl-uni", type=float, default=1.0, help="Weight for anti-collapse KL term")
-    parser.add_argument("--cliff-sigma", type=float, default=0.1, help="KDE bandwidth for Cliff loss")
+    parser.add_argument(
+        "--cliff-sigma", type=float, default=None,
+        help="KDE bandwidth for Cliff loss (default: auto via Silverman's rule)",
+    )
     parser.add_argument("--cliff-K", type=int, default=100, help="Grid points for numerical integration in Cliff")
     parser.add_argument("--cliff-M", type=int, default=10, help="Conditioning values for bivariate Cliff term")
     parser.add_argument(
