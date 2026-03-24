@@ -268,9 +268,27 @@ class BaselineLoss(torch.nn.Module):
         return self.summaries
 
 class CliffLoss(torch.nn.Module):
-    def __init__(self, commitment_weight: float = 0.25):
+    def __init__(
+        self,
+        lambda_uni: float = 1.0,
+        lambda_biv: float = 1.0,
+        lambda_kl_uni: float = 1.0,
+        sigma: float = 0.1,
+        K: int = 100,
+        M: int = 10,
+        z_min: float = -5.0,
+        z_max: float = 5.0,
+    ):
         super(CliffLoss, self).__init__()
-        
+        self.lambda_uni = lambda_uni
+        self.lambda_biv = lambda_biv
+        self.lambda_kl_uni = lambda_kl_uni
+        self.sigma = sigma
+        self.K = K
+        self.M = M
+        self.z_min = z_min
+        self.z_max = z_max
+        self.summaries: Dict = {TBSummaryTypes.SCALAR: dict()}
     def univariate_cliff_loss(self, z, sigma=0.1, K=100, z_min=-5.0, z_max=5.0):
         """
         Computes l_uni = sum_i H(s_i), the entropy of the normalized
@@ -434,16 +452,38 @@ class CliffLoss(torch.nn.Module):
 
         return total_kl  # minimize this
     
-    def forward(self, network_output: Dict[str, List[torch.Tensor]], target: torch.Tensor) -> torch.Tensor:
-        # gt = ground truth, recon = reconstruction
-        gt = target.float()
-        recon = network_output["reconstruction"][0].float()
-        q_losses = network_output["quantization_losses"]
+    def _standardize(self, z: torch.Tensor) -> torch.Tensor:
+        """Standardize each factor to zero mean and unit variance (per-batch)."""
+        mu = z.mean(dim=0, keepdim=True)
+        std = z.std(dim=0, keepdim=True).clamp(min=1e-8)
+        return (z - mu) / std
 
-        loss = self.unientropy(recon) + self.bientropy(recon) + self.dirac_delta(recon - gt)
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        """Compute L_Cliff = λ_uni * l_uni + λ_biv * l_biv + λ_KL-uni * l_KL-uni.
 
-        for idx, q_loss in enumerate(q_losses):
-            q_loss = q_loss.float()
-            loss = loss + q_loss
+        Args:
+            z: (n, d) tensor of latent factors from the encoder.
+        """
+        z_std = self._standardize(z)
+
+        l_uni = self.univariate_cliff_loss(
+            z_std, sigma=self.sigma, K=self.K, z_min=self.z_min, z_max=self.z_max
+        )
+        l_biv = self.bivariate_cliff_loss(
+            z_std, sigma=self.sigma, K=self.K, M=self.M, z_min=self.z_min, z_max=self.z_max
+        )
+        l_kl = self.anticollapse_loss(
+            z_std, sigma=self.sigma, K=self.K, z_min=self.z_min, z_max=self.z_max
+        )
+
+        loss = self.lambda_uni * l_uni + self.lambda_biv * l_biv + self.lambda_kl_uni * l_kl
+
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-Cliff-Univariate"] = l_uni
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-Cliff-Bivariate"] = l_biv
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-Cliff-AntiCollapse"] = l_kl
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-Cliff-Total"] = loss
 
         return loss
+
+    def get_summaries(self) -> Dict[str, torch.Tensor]:
+        return self.summaries

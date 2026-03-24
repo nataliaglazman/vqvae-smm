@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 
 from config import parse_args
 from helper import get_device, get_parameter_count
-from loss import BaselineLoss
+from loss import BaselineLoss, CliffLoss
 from utils import (
     TBSummaryTypes, build_cached_dataset, build_transforms, load_items, save_decoded_images,
 )
@@ -137,26 +137,33 @@ def load_model_from_checkpoint(path, device="cpu"):
 
 
 @torch.no_grad()
-def validate(model, loader, loss_fn, device, amp_enabled):
+def validate(model, loader, device, amp_enabled, commitment_weight=0.25):
     model.eval()
     total, n = 0.0, 0
-    first_batch = None
+    first_sample = None
+    first_recon = None
     # Run validation in eager mode regardless of whether torch.compile is active.
     # The inductor backend recompiles for eval-mode (different BatchNorm graph) and
     # that recompilation requires a C compiler — which may not be on PATH in cluster
     # environments.  Eager mode is fast enough for a validation pass.
     _model_eval = torch._dynamo.disable(model) if hasattr(torch, "_dynamo") else model
     for batch in loader:
-        if first_batch is None:
-            first_batch = batch  # keep for decoded-image saving (avoids re-spawning workers)
         images = batch["image"].to(device, non_blocking=True)
         images = images.to(memory_format=torch.channels_last_3d)
         with torch.amp.autocast("cuda", enabled=amp_enabled):
             recon, diffs, *_ = _model_eval(images)
-            loss = loss_fn({"reconstruction": [recon], "quantization_losses": diffs}, images)
+            # Use only cheap pixel (L1) loss for validation — skip perceptual,
+            # FFT and GDL which are expensive and unnecessary for tracking val
+            # performance.
+            loss = torch.nn.functional.l1_loss(recon, images)
+            for d in diffs:
+                loss = loss + d.float() * commitment_weight
+        if first_sample is None:
+            first_sample = batch
+            first_recon = recon[0:1].detach().cpu()
         total += loss.item()
         n += 1
-    return first_batch, total / max(n, 1)
+    return first_sample, first_recon, total / max(n, 1)
 
 
 # ── Training ──────────────────────────────────────────────────────────────────
@@ -290,6 +297,19 @@ def train(args):
 
     # ── Loss / optimiser / scheduler ──────────────────────────────────────────
     loss_fn = BaselineLoss(commitment_weight=args.vq_commitment_weight).to(device)
+
+    cliff_fn = None
+    if args.use_cliff_loss:
+        cliff_fn = CliffLoss(
+            lambda_uni=args.cliff_lambda_uni,
+            lambda_biv=args.cliff_lambda_biv,
+            lambda_kl_uni=args.cliff_lambda_kl_uni,
+            sigma=args.cliff_sigma,
+            K=args.cliff_K,
+            M=args.cliff_M,
+        ).to(device)
+        log.info(f"Cliff loss enabled (scale={args.scale_cliff_loss})")
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     total_opt_steps = max(args.train_steps // args.gradient_accumulation_steps, 1)
@@ -350,7 +370,7 @@ def train(args):
             skip_recon = args.skip_recon_ratio > 0 and random.random() < args.skip_recon_ratio
 
             with torch.amp.autocast("cuda", enabled=amp_enabled):
-                recon, diffs, *_ = model(images, return_recon=not skip_recon)
+                recon, diffs, enc_features, *_ = model(images, return_recon=not skip_recon)
                 vq_loss = sum(d.float() for d in diffs) * args.vq_commitment_weight
                 if skip_recon:
                     loss = vq_loss
@@ -361,6 +381,15 @@ def train(args):
                     net_out = {"reconstruction": [recon], "quantization_losses": []}
                     recon_loss = loss_fn(net_out, images) * args.scale_recon_loss
                     loss = recon_loss + vq_loss
+
+                # Cliff disentanglement regularizer on pooled encoder latents
+                if cliff_fn is not None:
+                    # Pool spatial encoder features to (B, C) per level, then
+                    # concatenate across levels to form (B, d) latent vector z.
+                    pooled = [f.float().mean(dim=[2, 3, 4]) for f in enc_features if f is not None]
+                    z = torch.cat(pooled, dim=1)  # (B, d)
+                    cliff_loss = cliff_fn(z) * args.scale_cliff_loss
+                    loss = loss + cliff_loss
 
             scaler.scale(loss / args.gradient_accumulation_steps).backward()
 
@@ -407,17 +436,37 @@ def train(args):
                     csv_row[f"vq_loss_{i}"] = f"{d.item():.6f}"
                 csv_logger.log_train(csv_row)
 
-                log.info(
-                    f"step {step:>7d}/{args.train_steps} | loss {loss.item():.4f} | "
-                    f"lr {lr:.2e} | epoch {epoch} | {elapsed:.0f}s"
-                )
+                # Build a readable summary line with component losses
+                parts = [
+                    f"step {step:>7d}/{args.train_steps}",
+                    f"loss {loss.item():.4f}",
+                ]
+                if not skip_recon:
+                    summaries = loss_fn.get_summaries().get(TBSummaryTypes.SCALAR, {})
+                    for name, val in summaries.items():
+                        v = val.item() if torch.is_tensor(val) else val
+                        if "MAE" in name:
+                            parts.append(f"pix {v:.4f}")
+                        elif "Jukebox" in name:
+                            parts.append(f"fft {v:.4f}")
+                        elif name == "Loss-Perceptual-Reconstruction":
+                            parts.append(f"perc {v:.4f}")
+                        elif "GDL" in name:
+                            parts.append(f"gdl {v:.4f}")
+                vq_vals = [f"{d.item():.4f}" for d in diffs]
+                parts.append(f"vq [{','.join(vq_vals)}]")
+                parts.extend([f"lr {lr:.2e}", f"ep {epoch}", f"{elapsed:.0f}s"])
+                log.info(" | ".join(parts))
 
             # ── Validation + checkpoint ───────────────────────────────────
             if step > 0 and step % args.checkpoint_steps == 0:
-                val_sample, val_loss = validate(model, val_loader, loss_fn, device, amp_enabled)
+                val_sample, val_recon, val_loss = validate(
+                    model, val_loader, device, amp_enabled,
+                    commitment_weight=args.vq_commitment_weight,
+                )
                 save_decoded_images(
-                    model=model,
                     data=val_sample,
+                    recon=val_recon,
                     args=args,
                     step=step,
                     save_dir=save_dir,
@@ -527,7 +576,10 @@ def run_evaluation(args):
     loss_fn = BaselineLoss(commitment_weight=args.vq_commitment_weight).to(device)
     log.info(f"Evaluating on {len(val_set)} samples...")
 
-    val_sample, val_loss = validate(model, val_loader, loss_fn, device, amp_enabled)
+    val_sample, val_recon, val_loss = validate(
+        model, val_loader, device, amp_enabled,
+        commitment_weight=args.vq_commitment_weight,
+    )
     log.info(f"Validation loss: {val_loss:.4f}")
 
     # Log per-level codebook utilization (EMA-based from training)
@@ -556,7 +608,7 @@ def run_evaluation(args):
     # Save example reconstructions
     save_dir = Path(args.model_dir) / args.model_id / "eval_images"
     save_dir.mkdir(exist_ok=True)
-    save_decoded_images(model=model, data=val_sample, args=args, step=0, save_dir=save_dir)
+    save_decoded_images(data=val_sample, recon=val_recon, args=args, step=0, save_dir=save_dir)
     log.info(f"Example reconstructions saved → {save_dir}")
 
 

@@ -148,6 +148,18 @@ def parse_args() -> argparse.ArgumentParser:
         "--warmup-steps", type=int, default=500,
         help="Linear LR warmup steps before cosine decay (0 to disable)",
     )
+    # Cliff loss
+    parser.add_argument(
+        "--use-cliff-loss", action="store_true",
+        help="Add Cliff disentanglement regularizer on encoder latents",
+    )
+    parser.add_argument("--scale-cliff-loss", type=float, default=1.0, help="Overall scale for Cliff loss")
+    parser.add_argument("--cliff-lambda-uni", type=float, default=1.0, help="Weight for univariate cliff term")
+    parser.add_argument("--cliff-lambda-biv", type=float, default=1.0, help="Weight for bivariate cliff term")
+    parser.add_argument("--cliff-lambda-kl-uni", type=float, default=1.0, help="Weight for anti-collapse KL term")
+    parser.add_argument("--cliff-sigma", type=float, default=0.1, help="KDE bandwidth for Cliff loss")
+    parser.add_argument("--cliff-K", type=int, default=100, help="Grid points for numerical integration in Cliff")
+    parser.add_argument("--cliff-M", type=int, default=10, help="Conditioning values for bivariate Cliff term")
     parser.add_argument("--change-lists", default=[[4, 5, 6, 8, 9, 10]])
     parser.add_argument("--faiss-omp-threads", type=int, default=16)
     # Evaluation

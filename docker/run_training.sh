@@ -2,9 +2,9 @@
 set -euo pipefail
 
 python /nfs/home/nglazman/vqvae-smm/train.py \
-    --dataroot /nfs/home/nglazman/ADNI_stripped \
+    --dataroot /nfs/home/nglazman/ADNI_scalarmomentum \
     --csv-path /nfs/home/nglazman/cluster/labels_cleaned_3class.csv \
-    --model-id vqvae-stripped \
+    --model-id vqvae-scalar-momentum-cropped \
     --batch-size 2 \
     --image-spacing 1.0 \
     --lr 1e-4 \

@@ -304,47 +304,35 @@ def build_cached_dataset(data_dicts, det_transform, rand_transform=None,
     return cache_ds
 
 
-def save_decoded_images(model, data, args, step: int, save_dir: Path) -> None:
+def save_decoded_images(data, recon, args, step: int, save_dir: Path) -> None:
     """
-    Encode then decode the first sample and write original + reconstruction as NIfTI files.
+    Write original + pre-computed reconstruction as NIfTI files.
 
     Args:
-        model: VQVAE model.
         data: Current batch dictionary (must contain key ``"image"``).
+        recon: Pre-computed reconstruction tensor for the first sample,
+               shape ``(1, C, D, H, W)`` (already on CPU).
         args: Parsed argument namespace.
         step: Current training step (used in the output filename).
         save_dir: Directory to save the NIfTI files.
     """
     import nibabel as nib
 
-    device = next(model.parameters()).device
-    amp_enabled = device.type == "cuda" and getattr(args, "use_amp", False)
+    img = data["image"][0:1]  # (1, C, D, H, W) — first sample
 
-    with torch.no_grad():
-        samples = data["image"]
-        img = samples[0:1]  # (1, C, D, H, W) — first sample, keep batch dim
+    decoded_np = recon.float().squeeze().cpu().numpy()
+    original_np = img.squeeze().cpu().numpy()
 
-        # If training used torch.compile(inductor), running occasional eval-mode
-        # forwards here can trigger a new compile that requires a system C
-        # compiler. Force eager execution for this utility path.
-        model_for_decode = torch._dynamo.disable(model) if hasattr(torch, "_dynamo") else model
+    spacing = getattr(args, "image_spacing", 2.0)
+    affine = np.diag([spacing, spacing, spacing, 1.0])
+    os.makedirs(save_dir, exist_ok=True)
 
-        with torch.amp.autocast("cuda", enabled=amp_enabled):
-            decoded = model_for_decode(img.to(device), return_recon=True)[0]
-
-        decoded_np = decoded.float().squeeze().cpu().numpy()
-        original_np = img.squeeze().cpu().numpy()
-
-        spacing = getattr(args, "image_spacing", 2.0)
-        affine = np.diag([spacing, spacing, spacing, 1.0])
-        os.makedirs(save_dir, exist_ok=True)
-
-        nib.save(
-            nib.Nifti1Image(original_np, affine=affine),
-            f"{save_dir}/step_{step:05d}_original.nii.gz",
-        )
-        nib.save(
-            nib.Nifti1Image(decoded_np, affine=affine),
-            f"{save_dir}/step_{step:05d}_decoded.nii.gz",
-        )
-        print(f"[SAVED] Decoded images at step {step} to {save_dir}/", flush=True)
+    nib.save(
+        nib.Nifti1Image(original_np, affine=affine),
+        f"{save_dir}/step_{step:05d}_original.nii.gz",
+    )
+    nib.save(
+        nib.Nifti1Image(decoded_np, affine=affine),
+        f"{save_dir}/step_{step:05d}_decoded.nii.gz",
+    )
+    print(f"[SAVED] Decoded images at step {step} to {save_dir}/", flush=True)
