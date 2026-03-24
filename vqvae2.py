@@ -407,6 +407,7 @@ class VQVAE(HelperModule):
                               If pool_only=False: list of (B, C, D, H, W) spatial maps
             decoder_outputs: Decoder features per level (or empty list)
             id_outputs: Codebook indices per level
+            encoder_pools: Always-available list of (B, C) pooled encoder vectors per level
         """
         assert x.ndim == 5, f"Expected 5D input (B, C, D, H, W), got {x.ndim}D with shape {x.shape}"
         assert x.shape[1] == self.in_channels, (
@@ -426,9 +427,10 @@ class VQVAE(HelperModule):
                 encoder_outputs.append(enc(encoder_outputs[-1]))
             else:
                 encoder_outputs.append(enc(x))
-            if pool_only:
-                # Global average pool: (B, C, D, H, W) -> (B, C)
-                encoder_pools.append(encoder_outputs[-1].mean(dim=[2, 3, 4]))
+            # Global average pool: (B, C, D, H, W) -> (B, C)
+            # Always computed (cheap) so pooled features are available for
+            # downstream losses (e.g. Cliff) even when pool_only=False.
+            encoder_pools.append(encoder_outputs[-1].mean(dim=[2, 3, 4]))
 
         del x
 
@@ -520,6 +522,7 @@ class VQVAE(HelperModule):
             encoder_features,
             decoder_outputs,
             id_outputs,
+            encoder_pools,
         )
 
     def decode_codes(self, *cs):

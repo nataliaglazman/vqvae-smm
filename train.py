@@ -46,7 +46,12 @@ class CSVLogger:
 
     VAL_COLUMNS = ["step", "epoch", "elapsed_s", "val_loss"]
 
-    def __init__(self, out_dir: Path, nb_levels: int):
+    CLIFF_COLUMNS = [
+        "Loss-Cliff-Univariate", "Loss-Cliff-Bivariate",
+        "Loss-Cliff-AntiCollapse", "Loss-Cliff-Total",
+    ]
+
+    def __init__(self, out_dir: Path, nb_levels: int, use_cliff: bool = False):
         self.out_dir = out_dir
         self.nb_levels = nb_levels
 
@@ -54,6 +59,8 @@ class CSVLogger:
         self.train_columns = list(self.TRAIN_COLUMNS)
         for i in range(nb_levels):
             self.train_columns.append(f"vq_loss_{i}")
+        if use_cliff:
+            self.train_columns.extend(self.CLIFF_COLUMNS)
 
         self.train_path = out_dir / "train_losses.csv"
         self.val_path = out_dir / "val_losses.csv"
@@ -345,7 +352,7 @@ def train(args):
         log.warning("tensorboard not installed -- logging to stdout only")
 
     # ── CSV Logger ────────────────────────────────────────────────────────────
-    csv_logger = CSVLogger(out_dir, nb_levels=args.vqvae_nb_levels)
+    csv_logger = CSVLogger(out_dir, nb_levels=args.vqvae_nb_levels, use_cliff=args.use_cliff_loss)
     log.info(f"CSV logs -> {csv_logger.train_path}, {csv_logger.val_path}")
 
     # ── Training loop ─────────────────────────────────────────────────────────
@@ -370,7 +377,7 @@ def train(args):
             skip_recon = args.skip_recon_ratio > 0 and random.random() < args.skip_recon_ratio
 
             with torch.amp.autocast("cuda", enabled=amp_enabled):
-                recon, diffs, enc_features, *_ = model(images, return_recon=not skip_recon)
+                recon, diffs, _enc_feat, _dec_out, _ids, enc_pools = model(images, return_recon=not skip_recon)
                 vq_loss = sum(d.float() for d in diffs) * args.vq_commitment_weight
                 if skip_recon:
                     loss = vq_loss
@@ -384,10 +391,9 @@ def train(args):
 
                 # Cliff disentanglement regularizer on pooled encoder latents
                 if cliff_fn is not None:
-                    # Pool spatial encoder features to (B, C) per level, then
-                    # concatenate across levels to form (B, d) latent vector z.
-                    pooled = [f.float().mean(dim=[2, 3, 4]) for f in enc_features if f is not None]
-                    z = torch.cat(pooled, dim=1)  # (B, d)
+                    # enc_pools: list of (B, C) per encoder level — concatenate
+                    # across levels to form (B, d) latent vector z.
+                    z = torch.cat([p.float() for p in enc_pools], dim=1)  # (B, d)
                     cliff_loss = cliff_fn(z) * args.scale_cliff_loss
                     loss = loss + cliff_loss
 
@@ -415,6 +421,10 @@ def train(args):
                         for name, val in loss_fn.get_summaries().get(TBSummaryTypes.SCALAR, {}).items():
                             v = val.item() if torch.is_tensor(val) else val
                             writer.add_scalar(f"train/{name}", v, step)
+                    if cliff_fn is not None:
+                        for name, val in cliff_fn.get_summaries().get(TBSummaryTypes.SCALAR, {}).items():
+                            v = val.item() if torch.is_tensor(val) else val
+                            writer.add_scalar(f"train/{name}", v, step)
 
                 # CSV row
                 csv_row = {
@@ -434,6 +444,11 @@ def train(args):
                             csv_row["perceptual_loss"] = f"{v:.6f}"
                 for i, d in enumerate(diffs):
                     csv_row[f"vq_loss_{i}"] = f"{d.item():.6f}"
+                if cliff_fn is not None:
+                    cliff_summaries = cliff_fn.get_summaries().get(TBSummaryTypes.SCALAR, {})
+                    for name, val in cliff_summaries.items():
+                        v = val.item() if torch.is_tensor(val) else val
+                        csv_row[name] = f"{v:.6f}"
                 csv_logger.log_train(csv_row)
 
                 # Build a readable summary line with component losses
@@ -455,6 +470,11 @@ def train(args):
                             parts.append(f"gdl {v:.4f}")
                 vq_vals = [f"{d.item():.4f}" for d in diffs]
                 parts.append(f"vq [{','.join(vq_vals)}]")
+                if cliff_fn is not None:
+                    cliff_total = cliff_fn.get_summaries().get(TBSummaryTypes.SCALAR, {}).get("Loss-Cliff-Total")
+                    if cliff_total is not None:
+                        v = cliff_total.item() if torch.is_tensor(cliff_total) else cliff_total
+                        parts.append(f"cliff {v:.4f}")
                 parts.extend([f"lr {lr:.2e}", f"ep {epoch}", f"{elapsed:.0f}s"])
                 log.info(" | ".join(parts))
 
@@ -596,7 +616,7 @@ def run_evaluation(args):
             images = batch["image"].to(device, non_blocking=True)
             images = images.to(memory_format=torch.channels_last_3d)
             with torch.amp.autocast("cuda", enabled=amp_enabled):
-                _, _, _, _, id_outputs = model(images, return_recon=True)
+                _, _, _, _, id_outputs, _ = model(images, return_recon=True)
             for lvl in range(model.nb_levels):
                 all_ids[lvl].append(id_outputs[lvl].cpu())
     for i, codebook in enumerate(model.codebooks):
