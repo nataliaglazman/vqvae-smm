@@ -160,6 +160,10 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--cliff-sigma", type=float, default=0.1, help="KDE bandwidth for Cliff loss")
     parser.add_argument("--cliff-K", type=int, default=100, help="Grid points for numerical integration in Cliff")
     parser.add_argument("--cliff-M", type=int, default=10, help="Conditioning values for bivariate Cliff term")
+    parser.add_argument(
+        "--cliff-latent-dim", type=int, default=32,
+        help="Learnable projection dim for Cliff loss (reduces encoder channels to this many factors)",
+    )
     parser.add_argument("--change-lists", default=[[4, 5, 6, 8, 9, 10]])
     parser.add_argument("--faiss-omp-threads", type=int, default=16)
     # Evaluation

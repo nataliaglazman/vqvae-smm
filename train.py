@@ -307,6 +307,8 @@ def train(args):
 
     cliff_fn = None
     if args.use_cliff_loss:
+        # Input dim = hidden_channels per encoder level × nb_levels
+        cliff_in_dim = args.vqvae_hidden_channels * args.vqvae_nb_levels
         cliff_fn = CliffLoss(
             lambda_uni=args.cliff_lambda_uni,
             lambda_biv=args.cliff_lambda_biv,
@@ -314,10 +316,19 @@ def train(args):
             sigma=args.cliff_sigma,
             K=args.cliff_K,
             M=args.cliff_M,
+            latent_dim=args.cliff_latent_dim,
+            in_dim=cliff_in_dim,
         ).to(device)
-        log.info(f"Cliff loss enabled (scale={args.scale_cliff_loss})")
+        log.info(
+            f"Cliff loss enabled (scale={args.scale_cliff_loss}, "
+            f"projection {cliff_in_dim} -> {args.cliff_latent_dim})"
+        )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    # Optimise model params + cliff projection (if present)
+    optim_params = list(model.parameters())
+    if cliff_fn is not None:
+        optim_params += list(cliff_fn.parameters())
+    optimizer = torch.optim.AdamW(optim_params, lr=args.lr)
 
     total_opt_steps = max(args.train_steps // args.gradient_accumulation_steps, 1)
     warmup_steps = min(args.warmup_steps, total_opt_steps // 5)  # cap at 20% of training
