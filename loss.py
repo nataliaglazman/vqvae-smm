@@ -482,7 +482,8 @@ class CliffLoss(torch.nn.Module):
             self._ensure_proj(z.shape[1], z.device)
             z = self.proj(z)
 
-            z_std = self._standardize(z)
+            # z_std = self._standardize(z)
+            z_std = z 
             n = z_std.shape[0]
 
             # Adaptive bandwidth via Silverman's rule (or user override)
