@@ -154,9 +154,9 @@ def parse_args() -> argparse.ArgumentParser:
         help="Add Cliff disentanglement regularizer on encoder latents",
     )
     parser.add_argument("--scale-cliff-loss", type=float, default=1.0, help="Overall scale for Cliff loss")
-    parser.add_argument("--cliff-lambda-uni", type=float, default=1.0, help="Weight for univariate cliff term")
-    parser.add_argument("--cliff-lambda-biv", type=float, default=1.0, help="Weight for bivariate cliff term")
-    parser.add_argument("--cliff-lambda-kl-uni", type=float, default=1.0, help="Weight for anti-collapse KL term")
+    parser.add_argument("--cliff-lambda-uni", type=float, default=0.005, help="Weight for univariate cliff term")
+    parser.add_argument("--cliff-lambda-biv", type=float, default=0.0099, help="Weight for bivariate cliff term")
+    parser.add_argument("--cliff-lambda-kl-uni", type=float, default=0.06, help="Weight for anti-collapse KL term")
     parser.add_argument(
         "--cliff-sigma", type=float, default=None,
         help="KDE bandwidth for Cliff loss (default: auto via Silverman's rule)",
