@@ -268,12 +268,19 @@ class BaselineLoss(torch.nn.Module):
         return self.summaries
 
 class CliffLoss(torch.nn.Module):
-    """Cliff disentanglement loss (vectorized).
+    """Cliff disentanglement loss (Barin-Pacela et al., 2024).
 
-    Includes a learnable linear projection from raw encoder channels down to
-    ``latent_dim`` factors.  This keeps the O(d²) bivariate term tractable and
-    aligns with the paper's intent of regularizing a small set of interpretable
-    latent factors rather than hundreds of raw feature channels.
+    Encourages axis-aligned discontinuities (cliffs) in the learned latent
+    density via three terms:
+      - l_uni:    minimise entropy of gradient-magnitude density per marginal
+      - l_biv:    minimise JSD of conditional gradient-magnitude densities
+      - l_KL-uni: KL(Uniform || marginal) to prevent collapse to Diracs
+
+    Includes a learnable **nonlinear** projection (MLP) from raw encoder
+    channels down to ``latent_dim`` factors so that the projected factors
+    can develop non-Gaussian marginal shapes (cliffs).  A purely linear
+    projection preserves Gaussianity of pooled features, making the
+    normalised gradient-magnitude entropy a constant.
     """
 
     def __init__(
@@ -299,22 +306,39 @@ class CliffLoss(torch.nn.Module):
         self.latent_dim = latent_dim
         self.z_min = z_min
         self.z_max = z_max
-        # Learnable projection: raw encoder channels → latent factors
+        # Learnable nonlinear projection: raw encoder channels → latent factors
+        # An MLP (rather than a single linear layer) allows the projected
+        # factors to take non-Gaussian shapes, which is essential for the
+        # entropy-based uni/biv terms to produce a useful gradient signal.
         if in_dim is not None:
-            self.proj = torch.nn.Linear(in_dim, latent_dim, bias=False)
-            torch.nn.init.xavier_uniform_(self.proj.weight)
+            self.proj = self._build_proj(in_dim, latent_dim)
         else:
             self.proj = None  # will be lazily created on first forward
         self.summaries: Dict = {TBSummaryTypes.SCALAR: dict()}
 
     # ── helpers ────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _build_proj(in_features: int, latent_dim: int) -> torch.nn.Sequential:
+        """Build a small MLP projection: Linear → GELU → Linear."""
+        hidden = max(in_features // 2, latent_dim * 2)
+        proj = torch.nn.Sequential(
+            torch.nn.Linear(in_features, hidden),
+            torch.nn.GELU(),
+            torch.nn.Linear(hidden, latent_dim),
+        )
+        # Initialise for stable gradients at start
+        for m in proj:
+            if isinstance(m, torch.nn.Linear):
+                torch.nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    torch.nn.init.zeros_(m.bias)
+        return proj
+
     def _ensure_proj(self, in_features: int, device: torch.device):
-        """Create the projection layer on first call (lazy init)."""
+        """Create the projection MLP on first call (lazy init)."""
         if self.proj is None:
-            self.proj = torch.nn.Linear(in_features, self.latent_dim, bias=False).to(device)
-            # Xavier init for stable gradients at start
-            torch.nn.init.xavier_uniform_(self.proj.weight)
+            self.proj = self._build_proj(in_features, self.latent_dim).to(device)
 
     def _bandwidth(self, n: int) -> float:
         """Return KDE bandwidth.  If user set sigma explicitly, use that.
@@ -445,8 +469,11 @@ class CliffLoss(torch.nn.Module):
         sqrt3 = 3.0 ** 0.5
         K = self.K
 
-        # Sample K points from U(−√3, √3) — shared across all dims
-        u_samples = torch.rand(K, device=z.device) * 2 * sqrt3 - sqrt3  # (K,)
+        # Deterministic grid over U(−√3, √3) — matches paper Eq. 16 where the
+        # expectation E_U[log p(z_i)] is estimated as an average over K samples.
+        # Using a fixed grid (instead of torch.rand) removes stochastic noise so
+        # this term is directly comparable to the deterministic uni/biv terms.
+        u_samples = torch.linspace(-sqrt3, sqrt3, K, device=z.device)  # (K,)
 
         # KDE at uniform samples for ALL dims at once
         # diff: (d, K, n) = u_samples[k] − z[l, i]
@@ -482,8 +509,7 @@ class CliffLoss(torch.nn.Module):
             self._ensure_proj(z.shape[1], z.device)
             z = self.proj(z)
 
-            # z_std = self._standardize(z)
-            z_std = z 
+            z_std = self._standardize(z)
             n = z_std.shape[0]
 
             # Adaptive bandwidth via Silverman's rule (or user override)
