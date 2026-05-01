@@ -25,14 +25,12 @@ from monai.transforms import (
     ResizeWithPadOrCropd,
     Spacingd,
     ToTensord,
-    CreateBrainMaskd,
-    ApplyBrainMaskd,
-    IntersectMasksd,
      RandScaleIntensityd,
      RandBiasFieldd,
      RandAdjustContrastd,
      RandGaussianNoised,
      RandGaussianSmoothd,
+     MapTransform,
 )
 
 # Suppress nibabel's noisy "pixdim[0] (qfac) should be 1 or -1" info messages.
@@ -41,6 +39,45 @@ from monai.transforms import (
 logging.getLogger("nibabel").setLevel(logging.WARNING)
 
 log = logging.getLogger(__name__)
+
+
+class CreateBrainMaskd(MapTransform):
+    """Create a binary brain mask from the image (nonzero voxels) before resampling."""
+
+    def __init__(self, keys, mask_keys, threshold=50):
+        super().__init__(keys)
+        self.mask_keys = mask_keys
+        self.threshold = threshold  # Threshold for brain vs background
+
+    def __call__(self, data):
+        d = dict(data)
+        for key, mask_key in zip(self.keys, self.mask_keys):
+            # Create mask where image > threshold - handle both numpy and MetaTensor
+            img = d[key]
+            if hasattr(img, "cpu"):  # PyTorch tensor
+                mask = (img > self.threshold).float()
+            else:  # numpy array
+                mask = (np.array(img) > self.threshold).astype(np.float32)
+            d[mask_key] = mask
+        return d
+    
+
+
+class ApplyBrainMaskd(MapTransform):
+    """Apply brain mask to zero out background after normalization."""
+
+    def __init__(self, keys, mask_keys, threshold=0.5):
+        super().__init__(keys)
+        self.mask_keys = mask_keys
+        self.threshold = threshold
+
+    def __call__(self, data):
+        d = dict(data)
+        for key, mask_key in zip(self.keys, self.mask_keys):
+            mask = d[mask_key] > self.threshold  # After resampling, threshold at 0.5
+            d[key] = d[key] * mask
+        return d
+
 
 
 class TBSummaryTypes(str, enum.Enum):
