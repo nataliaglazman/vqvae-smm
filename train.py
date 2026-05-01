@@ -216,6 +216,7 @@ def train(args):
     train_transform, val_transform = transforms(
         spacing=args.image_spacing,
         crop_margin=args.crop_margin,
+        spatial_size=getattr(args, "spatial_size", None),
         asymmetric_aug=getattr(args, 'asymmetric_aug', False),
     )
 
@@ -572,6 +573,7 @@ def run_evaluation(args):
     _, val_transform = transforms(
         spacing=args.image_spacing,
         crop_margin=args.crop_margin,
+        spatial_size=getattr(args, "spatial_size", None),
     )
 
     if args.val_size < 1:

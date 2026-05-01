@@ -133,6 +133,7 @@ def parse_args() -> argparse.ArgumentParser:
     # Image preprocessing
     parser.add_argument("--image-spacing", type=float, default=1.0, help="Isotropic voxel spacing in mm")
     parser.add_argument("--crop-margin", type=int, default=0, help="Voxels to crop from each edge")
+    parser.add_argument("--spatial-size", type=int, nargs="+", default=None, help="Explicit spatial size (depth height width) in voxels. Overrides size derived from spacing and crop-margin.")
     parser.add_argument(
         "--downsample", type=float, default=1.0,
         help="Extra spatial downsampling factor after resampling/cropping "
