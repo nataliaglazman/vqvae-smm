@@ -160,10 +160,12 @@ def validate(model, loader, device, amp_enabled, commitment_weight=0.25):
         images = images.to(memory_format=torch.channels_last_3d)
         with torch.amp.autocast("cuda", enabled=amp_enabled):
             recon, diffs, *_ = _model_eval(images)
-            # Use only cheap pixel (L1) loss for validation — skip perceptual,
-            # FFT and GDL which are expensive and unnecessary for tracking val
-            # performance.
-            loss = torch.nn.functional.l1_loss(recon, images)
+            # Use only cheap pixel (L1) loss for validation, masked if available.
+            if "mask" in batch:
+                mask = batch["mask"].to(device, non_blocking=True)
+                loss = torch.nn.functional.l1_loss(recon * mask, images * mask, reduction="sum") / mask.sum().clamp(min=1e-5)
+            else:
+                loss = torch.nn.functional.l1_loss(recon, images)
             for d in diffs:
                 loss = loss + d.float() * commitment_weight
         if first_sample is None:
@@ -395,6 +397,8 @@ def train(args):
                     # separately from VQ loss so scale_recon_loss doesn't also
                     # scale the commitment cost.
                     net_out = {"reconstruction": [recon], "quantization_losses": []}
+                    if "mask" in batch:
+                        net_out["mask"] = batch["mask"].to(device, non_blocking=True)
                     recon_loss = loss_fn(net_out, images) * args.scale_recon_loss
                     loss = recon_loss + vq_loss
 
