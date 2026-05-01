@@ -10,12 +10,13 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from monai.data import Dataset, CacheDataset
 
 from config import parse_args
 from helper import get_device, get_parameter_count
 from loss import BaselineLoss, CliffLoss
 from utils import (
-    TBSummaryTypes, build_cached_dataset, build_transforms, load_items, save_decoded_images,
+    TBSummaryTypes, build_cached_dataset, transforms, load_items, save_decoded_images,
 )
 from vqvae2 import VQVAE, CodeLayer
 
@@ -205,16 +206,15 @@ def train(args):
         torch.cuda.manual_seed_all(args.seed)
 
     # ── Data ──────────────────────────────────────────────────────────────────
-    items = load_items(args.dataroot, args.csv_path)
+    items = load_items(args.dataroot, args.csv_path, load_masks=getattr(args, "masks_from_disk", False))
     if not items:
         log.error("No data items found. Check --dataroot and --csv-path.")
         return
 
-    det_transform, rand_transform = build_transforms(
+    train_transform, val_transform = transforms(
         spacing=args.image_spacing,
         crop_margin=args.crop_margin,
-        downsample=args.downsample,
-        sample_path=items[0]["image"],
+        asymmetric_aug=getattr(args, 'asymmetric_aug', False),
     )
 
     # Train / val split (stratified by class label)
@@ -238,17 +238,15 @@ def train(args):
     rng.shuffle(val_items)
 
     # Build MONAI data dicts (CacheDataset expects list-of-dicts with file paths)
-    train_dicts = [{"image": it["image"]} for it in train_items]
-    val_dicts = [{"image": it["image"]} for it in val_items]
+    train_dicts = [{"image": it["image"], "mask": it["mask"]} if "mask" in it else {"image": it["image"]} for it in train_items]
+    val_dicts = [{"image": it["image"], "mask": it["mask"]} if "mask" in it else {"image": it["image"]} for it in val_items]
 
     # CacheDataset caches deterministic transforms in RAM (load once).
     # Random augmentation is applied on-the-fly by CachedAugDataset wrapper.
-    train_set = build_cached_dataset(
-        train_dicts, det_transform, rand_transform=rand_transform,
-        cache_rate=args.cache_rate, num_workers=args.workers,
-    )
-    val_set = build_cached_dataset(
-        val_dicts, det_transform, rand_transform=None,
+    # Standard Dataset (no cache) because train_transform includes random augmentations
+    train_set = Dataset(data=train_dicts, transform=train_transform)
+    val_set = CacheDataset(
+        data=val_dicts, transform=val_transform,
         cache_rate=args.val_cache_rate, num_workers=args.workers,
     )
     log.info(f"Dataset split -- train: {len(train_set)}, val: {len(val_set)}")
@@ -562,16 +560,14 @@ def run_evaluation(args):
     model = load_model_from_checkpoint(str(ckpt_path), device)
 
     # Build validation data
-    items = load_items(args.dataroot, args.csv_path)
+    items = load_items(args.dataroot, args.csv_path, load_masks=getattr(args, "masks_from_disk", False))
     if not items:
         log.error("No data items found.")
         return
 
-    det_transform, _ = build_transforms(
+    _, val_transform = transforms(
         spacing=args.image_spacing,
         crop_margin=args.crop_margin,
-        downsample=args.downsample,
-        sample_path=items[0]["image"],
     )
 
     if args.val_size < 1:
@@ -590,10 +586,10 @@ def run_evaluation(args):
         n_val = max(1, int(len(lbl_indices) * val_count / len(items)))
         val_items.extend(items[i] for i in lbl_indices[:n_val])
     rng.shuffle(val_items)
-    val_dicts = [{"image": it["image"]} for it in val_items]
+    val_dicts = [{"image": it["image"], "mask": it["mask"]} if "mask" in it else {"image": it["image"]} for it in val_items]
 
-    val_set = build_cached_dataset(
-        val_dicts, det_transform, rand_transform=None,
+    val_set = CacheDataset(
+        data=val_dicts, transform=val_transform,
         cache_rate=args.val_cache_rate, num_workers=args.workers,
     )
     loader_kwargs = dict(

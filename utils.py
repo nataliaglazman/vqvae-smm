@@ -3,6 +3,7 @@
 import enum
 import logging
 import os
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +25,14 @@ from monai.transforms import (
     ResizeWithPadOrCropd,
     Spacingd,
     ToTensord,
+    CreateBrainMaskd,
+    ApplyBrainMaskd,
+    IntersectMasksd,
+     RandScaleIntensityd,
+     RandBiasFieldd,
+     RandAdjustContrastd,
+     RandGaussianNoised,
+     RandGaussianSmoothd,
 )
 
 # Suppress nibabel's noisy "pixdim[0] (qfac) should be 1 or -1" info messages.
@@ -99,8 +108,8 @@ def _ensure_3d_image(x):
     return x
 
 
-def build_transforms(spacing=2.0, crop_margin=0, downsample=1.0,
-                     sample_path=None):
+def _build_single_image_transforms(spacing=2.0, crop_margin=0, downsample=1.0,
+                                   sample_path=None):
     """Build deterministic + random transform pipelines for CacheDataset.
 
     The deterministic transforms (load, resample, orient, normalize) are
@@ -199,30 +208,241 @@ def build_transforms(spacing=2.0, crop_margin=0, downsample=1.0,
     return det_transform, rand_transform
 
 
-def load_data(df, data_dir, label_map):
+def build_transforms(*args, **kwargs):
+    """Backward-compatible wrapper for the single-image transform builder.
+
+    Prefer :func:`transforms` for the paired-modality pipeline.  This wrapper
+    preserves the older API used by the training script and external callers.
+    """
+    warnings.warn(
+        "build_transforms is deprecated; use transforms for paired-modality "
+        "pipelines or _build_single_image_transforms for the legacy single-image "
+        "pipeline.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _build_single_image_transforms(*args, **kwargs)
+
+
+def transforms(
+    spacing=2.0,
+    crop_margin=0,
+    spatial_size=None,
+    masks_from_disk=False,
+    asymmetric_aug=False,
+):
+    """
+    Create training and validation transforms for brain MRI images.
+
+    Args:
+        spacing: Isotropic voxel spacing in mm.
+                 - 1.0: Original resolution (~182x218x182)
+                 - 2.0: Downsampled (~91x109x91)
+        crop_margin: Number of voxels to crop from each edge (all 6 sides).
+                     E.g., crop_margin=4 removes 4 voxels from each side,
+                     reducing each dimension by 8.
+        spatial_size: Explicit (D, H, W) tuple.  When provided, overrides the
+                      size derived from *spacing* and *crop_margin*.
+        asymmetric_aug: When True, apply independent intensity augmentations per view
+                        (T1 and T2 receive different random draws for shift, scale,
+                        bias field, gamma, noise, and smoothing). Spatial augmentations
+                        remain synced across views.
+    Returns:
+        train_transforms, val_transforms
+    """
+    if spatial_size is not None:
+        spatial_size = tuple(spatial_size)
+        if crop_margin > 0:
+            logging.warning(
+                f"--spatial-size {spatial_size} is set — --crop-margin {crop_margin} "
+                f"will be applied on top (reducing each dim by {2 * crop_margin})."
+            )
+            spatial_size = tuple(s - 2 * crop_margin for s in spatial_size)
+    else:
+        # Calculate spatial size based on spacing
+        # Original 1mm images are approximately 182x218x182
+        if spacing == 1.0:
+            spatial_size = (182, 218, 182)
+        elif spacing == 2.0:
+            spatial_size = (91, 109, 91)
+        else:
+            # Calculate proportionally from 1mm reference
+            spatial_size = tuple(int(s / spacing) for s in (182, 218, 182))
+
+        # Apply cropping: reduce each dimension by 2*crop_margin
+        if crop_margin > 0:
+            spatial_size = tuple(s - 2 * crop_margin for s in spatial_size)
+            logging.info(f"Cropping {crop_margin} voxels from each edge")
+
+    logging.info(f"Using voxel spacing: {spacing}mm, spatial size: {spatial_size}")
+
+    # Common transforms list builder
+    def build_transforms(is_training=False):
+        if masks_from_disk:
+            load_keys = ["image", "mask"]
+            transforms_list = [
+                LoadImaged(keys=load_keys),
+                EnsureChannelFirstd(keys=load_keys, channel_dim="no_channel"),
+            ]
+        else:
+            transforms_list = [
+                LoadImaged(keys=["image"]),
+                EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
+                # Create brain mask BEFORE resampling (where original > 0)
+                CreateBrainMaskd(keys=["image"], mask_keys=["mask"]),
+            ]
+
+        # Only add spacing transforms if not using original 1mm
+        if spacing != 1.0:
+            transforms_list.extend(
+                [
+                    Spacingd(
+                        keys=["image"],
+                        pixdim=(spacing, spacing, spacing),
+                        mode="bilinear",
+                    ),
+                    Spacingd(
+                        keys=["mask"],
+                        pixdim=(spacing, spacing, spacing),
+                        mode="nearest",
+                    ),
+                ]
+            )
+
+        transforms_list.extend(
+            [
+                Orientationd(keys=["image", "mask"], axcodes="RAS"),
+                ResizeWithPadOrCropd(
+                    keys=["image", "mask"],
+                    spatial_size=spatial_size,
+                ),
+                NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
+            ]
+        )
+        transforms_list.append(
+            ApplyBrainMaskd(
+                keys=["image"],
+                mask_keys=["mask"],
+                threshold=0.5,
+            )
+        )
+
+        # Add augmentations for training only
+        if is_training:
+            # Spatial transform is shared across views to preserve voxel-level
+            # correspondence (required by patch-InfoNCE and content alignment).
+            if asymmetric_aug:
+                # Also transform masks so they stay aligned after the re-apply step below.
+                transforms_list.append(
+                    RandAffined(
+                        keys=["image", "mask"],
+                        mode=["bilinear", "nearest"],
+                        rotate_range=[-0.05, 0.05],
+                        shear_range=[0.001, 0.05],
+                        scale_range=[0, 0.05],
+                        padding_mode="zeros",
+                        prob=0.5,
+                    )
+                )
+            else:
+                transforms_list.append(
+                    RandAffined(
+                        keys=["image", "mask"],
+                        rotate_range=[-0.05, 0.05],
+                        shear_range=[0.001, 0.05],
+                        scale_range=[0, 0.05],
+                        mode="bilinear",
+                        padding_mode="zeros",
+                        prob=0.5,
+                    )
+                )
+
+            if asymmetric_aug:
+                # Independent intensity augs per view — each view gets its own random draw.
+                # Each transform instance has its own RNG, so calling the same transform
+                # separately on image and mask yields different samples.
+                for view_key in ("image", "mask"):
+                    transforms_list.extend(
+                        [
+                            RandShiftIntensityd(keys=[view_key], offsets=(-0.1, 0.1), prob=0.5),
+                            RandScaleIntensityd(keys=[view_key], factors=0.1, prob=0.5),
+                            RandBiasFieldd(keys=[view_key], coeff_range=(0.0, 0.1), prob=0.3),
+                            RandAdjustContrastd(keys=[view_key], gamma=(0.7, 1.5), prob=0.3),
+                            RandGaussianNoised(keys=[view_key], std=0.05, prob=0.3),
+                            RandGaussianSmoothd(
+                                keys=[view_key],
+                                sigma_x=(0.25, 1.0),
+                                sigma_y=(0.25, 1.0),
+                                sigma_z=(0.25, 1.0),
+                                prob=0.2,
+                            ),
+                        ]
+                    )
+                # Re-apply brain mask so intensity augs don't leak signal into background.
+                transforms_list.append(
+                    ApplyBrainMaskd(
+                        keys=["image"],
+                        mask_keys=["mask"],
+                        threshold=0.5,
+                    )
+                )
+            else:
+                transforms_list.append(
+                    RandShiftIntensityd(keys=["image"], offsets=(-0.1, 0.1), prob=0.2)
+                )
+
+        transforms_list.append(ToTensord(keys=["image", "label"]))
+        return Compose(transforms_list)
+
+    train_transforms = build_transforms(is_training=True)
+    val_transforms = build_transforms(is_training=False)
+
+    return train_transforms, val_transforms
+
+
+
+def _find_brain_mask(dir_path, require_substr=None):
+    """Return path to ``*_brain_mask.nii.gz`` in ``dir_path``, or ``None``."""
+    if not os.path.exists(dir_path):
+        return None
+    for file in os.listdir(dir_path):
+        if not file.endswith("_brain_mask.nii.gz"):
+            continue
+        if require_substr is not None and require_substr not in file:
+            continue
+        return os.path.join(dir_path, file)
+    return None
+
+def load_data(df, data_dir, label_map, load_masks=False):
     """Scan data_dir for T1 images matching subjects in the dataframe."""
     exts = [".nii.gz", ".nii", ".mha", ".mhd", ".nrrd", ".npy"]
     items, missing = [], []
     for _, row in df.iterrows():
         subj = str(row["Subject"])
-        found = None
+        found_img = None
+        found_mask = None
         t1_dir = os.path.join(data_dir, subj, "t1")
         if os.path.isdir(t1_dir):
+            if load_masks:
+                found_mask = _find_brain_mask(t1_dir)
             for f in os.listdir(t1_dir):
-                if any(f.endswith(ext) for ext in exts):
-                    found = os.path.join(t1_dir, f)
+                if any(f.endswith(ext) for ext in exts) and not f.endswith("_brain_mask.nii.gz"):
+                    found_img = os.path.join(t1_dir, f)
                     break
-        if found:
-            items.append({"image": found, "label": label_map[row["Group"]], "subject": subj})
+        if found_img and (not load_masks or found_mask):
+            item = {"image": found_img, "label": label_map[row["Group"]], "subject": subj}
+            if load_masks:
+                item["mask"] = found_mask
+            items.append(item)
         else:
             missing.append(subj)
     if missing:
-        log.warning(f"Missing T1 for {len(missing)} subjects")
+        log.warning(f"Missing items for {len(missing)} subjects")
     log.info(f"Loaded {len(items)} subjects, {len(missing)} missing")
     return items, missing
 
 
-def load_items(data_dir, csv_path):
+def load_items(data_dir, csv_path, load_masks=False):
     """Load all data items from CSV + data directory."""
     df = pd.read_csv(csv_path)
     missing_cols = {"Subject", "Group"} - set(df.columns)
@@ -233,7 +453,7 @@ def load_items(data_dir, csv_path):
         )
     label_values = sorted(df["Group"].unique())
     label_map = {v: i for i, v in enumerate(label_values)}
-    items, _ = load_data(df, data_dir, label_map)
+    items, _ = load_data(df, data_dir, label_map, load_masks=load_masks)
     return items
 
 

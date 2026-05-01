@@ -97,9 +97,9 @@ class BaurLoss(object):
         return dx, dy, dz
 
 
-class BaselineLoss(torch.nn.Module):
+class BaselineLossOLD(torch.nn.Module):
     def __init__(self, commitment_weight: float = 0.25):
-        super(BaselineLoss, self).__init__()
+        super(BaselineLossOLD, self).__init__()
 
         self.pixel_factor = 1.0
         self.gdl_factor = 1.0
@@ -266,6 +266,112 @@ class BaselineLoss(torch.nn.Module):
 
     def get_summaries(self) -> Dict[str, torch.Tensor]:
         return self.summaries
+
+
+class BaselineLoss(torch.nn.Module):
+    def __init__(self):
+        super(BaselineLoss, self).__init__()
+
+        self.pixel_factor = 1.0
+
+        self.perceptual_factor = 0.002
+        self.n_slices = 16
+        self.perceptual_function = LPIPS(net="alex")
+
+        self.summaries: Dict = {TBSummaryTypes.SCALAR: dict()}
+
+    @torch.amp.autocast("cuda", enabled=False)
+    def forward(self, network_output: Dict[str, List[torch.Tensor]], y: torch.Tensor) -> torch.Tensor:
+        # Unpacking elements — compute entirely in float32 to avoid
+        # float16 overflow (FFT magnitudes and perceptual scaling can
+        # exceed the float16 range after enough training steps).
+        x = y.float()
+        y = network_output["reconstruction"][0].float()
+
+        # The decoder has no output activation, so y can have arbitrarily
+        # large values.  Clamp to the expected input range [-1, 1] to
+        # prevent the FFT magnitude and LPIPS from amplifying outliers
+        # into NaN.  Gradients still flow through non-clamped voxels;
+        # the clamp only kills gradient for values already far outside
+        # the valid range (desired — push them back via the pixel loss,
+        # not via an exploding FFT gradient).
+        y = y.clamp(-1.0, 1.0)
+
+        q_losses = network_output["quantization_losses"]
+
+        mask = network_output.get("mask")
+        if mask is not None:
+            mask = mask.float()
+            # Zero reconstruction outside the brain so the FFT / perceptual
+            # terms see the same support as the pixel term.
+            y = y * mask
+
+        loss = self._calculate_pixel_loss(x, y, mask=mask) + self._calculate_perceptual_loss(x, y)
+
+        for idx, q_loss in enumerate(q_losses):
+            q_loss = q_loss.float()
+
+            self.summaries[TBSummaryTypes.SCALAR][f"Loss-MSE-VQ{idx}_Commitment_Cost"] = q_loss.detach()
+
+            loss = loss + q_loss
+
+        return loss
+
+    def _calculate_pixel_loss(self, x, y, mask=None) -> torch.Tensor:
+        if mask is None:
+            loss = F.l1_loss(x, y)
+        else:
+            # Mean over brain voxels only — avoids diluting the loss with
+            # background zeros whose target and prediction are both ~0.
+            diff = (x - y).abs() * mask
+            denom = mask.sum().clamp_min(1.0)
+            loss = diff.sum() / denom
+        loss = loss * self.pixel_factor
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-MAE-Reconstruction"] = loss.detach()
+
+        return loss
+
+    def _calculate_perceptual_loss(self, x, y) -> torch.Tensor:
+        def _lpips_on_slices(x_vol, y_vol, perm_dims):
+            x_p = x_vol.permute(*perm_dims)
+            n_slices_total = x_p.shape[1]
+            indices = torch.randperm(n_slices_total, device=x_vol.device)[: self.n_slices]
+            sel_x = x_p[:, indices].contiguous().flatten(0, 1).detach()
+            del x_p
+            sel_y = y_vol.permute(*perm_dims)[:, indices].contiguous().flatten(0, 1)
+            if sel_x.shape[-1] > 96 or sel_x.shape[-2] > 96:
+                _target = (min(sel_x.shape[-2], 96), min(sel_x.shape[-1], 96))
+                sel_x = F.adaptive_avg_pool2d(sel_x, _target)
+                sel_y = F.adaptive_avg_pool2d(sel_y, _target)
+            if sel_x.shape[1] == 1:
+                sel_x = sel_x.expand(-1, 3, -1, -1)
+                sel_y = sel_y.expand(-1, 3, -1, -1)
+            p_loss = torch.mean(self.perceptual_function.forward(sel_x.float(), sel_y.float()))
+            if not torch.isfinite(p_loss):
+                return torch.zeros(1, device=x_vol.device, dtype=torch.float32, requires_grad=True).squeeze()
+            return p_loss
+
+        orientations = [
+            ("Sagittal", (0, 2, 1, 3, 4)),
+            ("Axial", (0, 4, 1, 2, 3)),
+            ("Coronal", (0, 3, 1, 2, 4)),
+        ]
+
+        total_p_loss = torch.zeros(1, device=x.device, dtype=torch.float32)
+        for name, perm_dims in orientations:
+            p_loss = _lpips_on_slices(x, y, perm_dims=perm_dims)
+            self.summaries[TBSummaryTypes.SCALAR][f"Loss-Perceptual_{name}-Reconstruction"] = p_loss.detach()
+            total_p_loss = total_p_loss + p_loss
+
+        loss = total_p_loss * self.perceptual_factor
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual-Reconstruction"] = loss.detach()
+
+        return loss
+
+    def get_summaries(self) -> Dict[str, torch.Tensor]:
+        return self.summaries
+
+
 
 class CliffLoss(torch.nn.Module):
     """Cliff disentanglement loss (Barin-Pacela et al., 2024).
