@@ -428,7 +428,7 @@ def transforms(
                     RandShiftIntensityd(keys=["image"], offsets=(-0.1, 0.1), prob=0.2)
                 )
 
-        transforms_list.append(ToTensord(keys=["image", "label"]))
+        transforms_list.append(ToTensord(keys=["image", "mask", "label"], allow_missing_keys=True))
         return Compose(transforms_list)
 
     train_transforms = build_transforms(is_training=True)
