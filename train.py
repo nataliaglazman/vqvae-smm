@@ -304,7 +304,7 @@ def train(args):
         model = torch.compile(model, backend=args.compile_backend)
 
     # ── Loss / optimiser / scheduler ──────────────────────────────────────────
-    loss_fn = BaselineLoss(commitment_weight=args.vq_commitment_weight).to(device)
+    loss_fn = BaselineLoss().to(device)
 
     cliff_fn = None
     if args.use_cliff_loss:
