@@ -388,33 +388,31 @@ def transforms(
                         rotate_range=[-0.05, 0.05],
                         shear_range=[0.001, 0.05],
                         scale_range=[0, 0.05],
-                        mode="bilinear",
+                        mode=["bilinear", "nearest"],
                         padding_mode="zeros",
                         prob=0.5,
                     )
                 )
 
             if asymmetric_aug:
-                # Independent intensity augs per view — each view gets its own random draw.
-                # Each transform instance has its own RNG, so calling the same transform
-                # separately on image and mask yields different samples.
-                for view_key in ("image", "mask"):
-                    transforms_list.extend(
-                        [
-                            RandShiftIntensityd(keys=[view_key], offsets=(-0.1, 0.1), prob=0.5),
-                            RandScaleIntensityd(keys=[view_key], factors=0.1, prob=0.5),
-                            RandBiasFieldd(keys=[view_key], coeff_range=(0.0, 0.1), prob=0.3),
-                            RandAdjustContrastd(keys=[view_key], gamma=(0.7, 1.5), prob=0.3),
-                            RandGaussianNoised(keys=[view_key], std=0.05, prob=0.3),
-                            RandGaussianSmoothd(
-                                keys=[view_key],
-                                sigma_x=(0.25, 1.0),
-                                sigma_y=(0.25, 1.0),
-                                sigma_z=(0.25, 1.0),
-                                prob=0.2,
-                            ),
-                        ]
-                    )
+                # Intensity augs apply only to the image — the brain mask is binary
+                # and must not be perturbed by bias field, noise, contrast, etc.
+                transforms_list.extend(
+                    [
+                        RandShiftIntensityd(keys=["image"], offsets=(-0.1, 0.1), prob=0.5),
+                        RandScaleIntensityd(keys=["image"], factors=0.1, prob=0.5),
+                        RandBiasFieldd(keys=["image"], coeff_range=(0.0, 0.1), prob=0.3),
+                        RandAdjustContrastd(keys=["image"], gamma=(0.7, 1.5), prob=0.3),
+                        RandGaussianNoised(keys=["image"], std=0.05, prob=0.3),
+                        RandGaussianSmoothd(
+                            keys=["image"],
+                            sigma_x=(0.25, 1.0),
+                            sigma_y=(0.25, 1.0),
+                            sigma_z=(0.25, 1.0),
+                            prob=0.2,
+                        ),
+                    ]
+                )
                 # Re-apply brain mask so intensity augs don't leak signal into background.
                 transforms_list.append(
                     ApplyBrainMaskd(
